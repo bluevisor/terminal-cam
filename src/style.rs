@@ -2,10 +2,10 @@
 //!
 //! Two families of transformations share one enum:
 //!
-//! 1. **Palette styles** (Sepia, VanGogh, Monet, Pixar, Simpsons) — throw
-//!    away the source hue and look each pixel up in a 5-stop luminance
-//!    gradient. This is why they look "flat" — it's the same trick art
-//!    directors use when reducing reference photos to a limited palette.
+//! 1. **Palette styles** (Sepia, VanGogh, Monet) — throw away the source hue
+//!    and look each pixel up in a 5-stop luminance gradient. This is why
+//!    they look "flat" — it's the same trick art directors use when
+//!    reducing reference photos to a limited palette.
 //!
 //! 2. **Trippy styles** (Mushroom, Lsd) — preserve luminance but rotate hue
 //!    in HSV space over time and cell position. Converting to HSV for a
@@ -21,20 +21,16 @@ pub enum Style {
     Sepia,
     VanGogh,
     Monet,
-    Pixar,
-    Simpsons,
     Mushroom,
     Lsd,
 }
 
-pub const ALL: [Style; 9] = [
+pub const ALL: [Style; 7] = [
     Style::Color,
     Style::BlackWhite,
     Style::Sepia,
     Style::VanGogh,
     Style::Monet,
-    Style::Pixar,
-    Style::Simpsons,
     Style::Mushroom,
     Style::Lsd,
 ];
@@ -47,8 +43,6 @@ impl Style {
             Style::Sepia => "Sepia",
             Style::VanGogh => "Van Gogh",
             Style::Monet => "Monet",
-            Style::Pixar => "Pixar",
-            Style::Simpsons => "Simpsons",
             Style::Mushroom => "Mushroom",
             Style::Lsd => "LSD",
         }
@@ -78,8 +72,6 @@ pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8
         Style::Sepia => sepia(r, g, b),
         Style::VanGogh => gradient_map(r, g, b, &VAN_GOGH),
         Style::Monet => gradient_map(r, g, b, &MONET),
-        Style::Pixar => gradient_map(r, g, b, &PIXAR),
-        Style::Simpsons => gradient_map(r, g, b, &SIMPSONS),
         Style::Mushroom => trippy(r, g, b, ctx, 40.0, 0.3, 1.2),
         Style::Lsd => trippy(r, g, b, ctx, 220.0, 1.0, 0.7),
     }
@@ -113,22 +105,6 @@ static MONET: [Stop; 5] = [
     (0.5, [178, 196, 188]),   // sage
     (0.75, [220, 196, 205]),  // pastel pink
     (1.0, [243, 228, 215]),   // cream
-];
-
-static PIXAR: [Stop; 5] = [
-    (0.0, [30, 25, 55]),      // deep purple
-    (0.25, [180, 90, 100]),   // coral
-    (0.5, [240, 165, 80]),    // warm orange
-    (0.75, [255, 215, 130]),  // warm yellow
-    (1.0, [255, 250, 220]),   // cream
-];
-
-static SIMPSONS: [Stop; 5] = [
-    (0.0, [40, 30, 120]),     // Marge blue
-    (0.25, [210, 60, 50]),    // red
-    (0.5, [255, 220, 60]),    // Simpson skin yellow
-    (0.75, [255, 240, 100]),  // bright yellow
-    (1.0, [255, 255, 200]),   // near white
 ];
 
 fn gradient_map(r: u8, g: u8, b: u8, stops: &[Stop]) -> (u8, u8, u8) {

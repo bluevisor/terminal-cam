@@ -4,7 +4,7 @@ ASCII-art webcam viewer for your terminal. Renders live camera video using
 all 95 printable ASCII characters sorted by ink density, with truecolor output
 and a handful of painterly color styles.
 
-![styles](https://img.shields.io/badge/styles-9-blue) ![rust](https://img.shields.io/badge/rust-2021-orange)
+![styles](https://img.shields.io/badge/styles-7-blue) ![rust](https://img.shields.io/badge/rust-2021-orange)
 
 ## Install
 
@@ -36,7 +36,7 @@ terminal application.
 ## Options menu
 
 - **Camera source** — cycle detected cameras
-- **Style** — `Full Color`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Pixar`, `Simpsons`, `Mushroom`, `LSD`
+- **Style** — `Full Color`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Mushroom`, `LSD`
 - **Mirror** — horizontal flip (on by default; webcams are usually mirrored)
 - **Brightness** — `-1.00` to `+1.00`, added to each RGB channel pre-style
 - **Contrast** — `0.1` to `3.0`, applied around 0.5 before the glyph curve
@@ -47,8 +47,8 @@ Per terminal cell:
 
 1. Average RGB over the source block.
 2. Add brightness offset.
-3. Apply style transform — palette styles (Van Gogh, Sepia, Simpsons, etc.)
-   map luminance into a 5-stop gradient, throwing away source hue. Trippy
+3. Apply style transform — palette styles (Sepia, Van Gogh, Monet) map
+   luminance into a 5-stop gradient, throwing away source hue. Trippy
    styles (Mushroom, LSD) rotate hue in HSV over time and cell position.
 4. Recompute luminance from the stylized RGB.
 5. Contrast-shape via `(l - 0.5) * contrast + 0.5`, then run through a
