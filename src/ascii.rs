@@ -15,15 +15,20 @@ pub const RAMP: [char; 95] = [
     '@', '#', '&', '%', '$',
 ];
 
-/// Apply contrast around 0.5, then shape with a sigmoid before indexing the ramp.
-/// In color mode the truecolor fg carries brightness, so a steep curve (punchy)
-/// is free. In B&W the glyph is the only signal — use a softer curve so the
-/// middle of the ramp (where most gradations live) stays in play.
+/// Apply contrast around 0.5, then shape with a sigmoid and rescale so the
+/// endpoints always land on ramp[0] (space) and ramp[last] (`$`). Without the
+/// rescale the B&W k=5 sigmoid would map deep black to `:` (idx 7), leaving
+/// a faint speckle in shadows — rescaling pins black to actual space.
+/// Color mode uses a steep curve (k=12); B&W uses a softer curve (k=5) so
+/// the middle of the ramp has room for midtone gradations.
 pub fn luma_to_char(luma: f32, contrast: f32, color: bool) -> char {
     let boosted = ((luma - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
     let k = if color { 12.0 } else { 5.0 };
     let shaped = 1.0 / (1.0 + (-k * (boosted - 0.5)).exp());
-    let idx = (shaped * (RAMP.len() - 1) as f32).round() as usize;
+    let lo = 1.0 / (1.0 + (k * 0.5).exp()); // sigmoid at boosted=0
+    let hi = 1.0 / (1.0 + (-k * 0.5).exp()); // sigmoid at boosted=1
+    let normalized = ((shaped - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let idx = (normalized * (RAMP.len() - 1) as f32).round() as usize;
     RAMP[idx]
 }
 
@@ -52,17 +57,29 @@ mod tests {
     }
 
     #[test]
+    fn bw_mode_saturates_extremes() {
+        // Normalization pins endpoints to the ramp extremes — deep black
+        // should render as space, peak white as '$'.
+        assert_eq!(luma_to_char(0.0, 1.0, false), ' ');
+        assert_eq!(luma_to_char(1.0, 1.0, false), '$');
+    }
+
+    #[test]
     fn bw_mode_preserves_midtone_headroom() {
-        // Softer curve keeps endpoints off the ramp extremes so midtones
-        // have characters to spare.
-        let dark = luma_to_char(0.0, 1.0, false);
-        let bright = luma_to_char(1.0, 1.0, false);
-        let dark_idx = RAMP.iter().position(|&c| c == dark).unwrap();
-        let bright_idx = RAMP.iter().position(|&c| c == bright).unwrap();
-        assert!(dark_idx < 10, "dark should be near the sparse end, got {dark_idx}");
+        // The softer B&W sigmoid should still keep near-shadow / near-
+        // highlight values inside the ramp interior, not collapse to the
+        // extremes the way a steep color curve does.
+        let mid_low = luma_to_char(0.25, 1.0, false);
+        let mid_high = luma_to_char(0.75, 1.0, false);
+        let mid_low_idx = RAMP.iter().position(|&c| c == mid_low).unwrap();
+        let mid_high_idx = RAMP.iter().position(|&c| c == mid_high).unwrap();
         assert!(
-            bright_idx > RAMP.len() - 15 && bright_idx < RAMP.len() - 1,
-            "bright should be dense but not maxed, got {bright_idx}"
+            mid_low_idx > 5,
+            "luma=0.25 shouldn't collapse near space, got idx {mid_low_idx}"
+        );
+        assert!(
+            mid_high_idx < RAMP.len() - 6,
+            "luma=0.75 shouldn't collapse near '$', got idx {mid_high_idx}"
         );
     }
 }

@@ -10,9 +10,11 @@
 //! - **Monet** — pastelized HSV with a slow dappled-light mottle and
 //!   atmospheric warm/cool hue shift.
 //! - **Mushroom** — radial mandala (concentric rings + angular petals)
-//!   plus a slow-drifting Julia-set iteration field.
-//! - **LSD** — Julia-set iteration count drives hue rotation over the
-//!   source image; the c-parameter drifts slowly so the fractal morphs.
+//!   plus a Julia-set iteration field whose sampling coordinates are
+//!   domain-warped by source luma, so the fractal bends around objects.
+//! - **LSD** — Julia-set iteration count drives hue rotation; both the
+//!   sampling coordinates *and* the c-parameter are modulated by source
+//!   luma, so different parts of the video render different fractal shapes.
 //!
 //! `Color` and `BlackWhite` are passthrough — the only difference is
 //! whether the renderer emits ANSI color escapes at all.
@@ -185,11 +187,14 @@ fn mushroom(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     let ring = ((radius * 0.3 - t * 0.85).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
     let petals = ((angle * 6.0 + t * 0.28).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
 
-    // Julia-set iteration field. c drifts in a small loop so the fractal
-    // morphs smoothly rather than snapping between shapes. Coordinate
-    // space is the visible grid mapped to roughly [-1.3, 1.3].
-    let jx = (ctx.x as f32 - cx) / cx * 1.3;
-    let jy = (ctx.y as f32 - cy) / cy * 0.65;
+    // Julia-set iteration field with image-driven domain warp: bright source
+    // pixels displace the Julia sampling toward +x/+y, dark pixels toward
+    // -x/-y, so the fractal's iso-lines curl around objects (face, edges)
+    // instead of being locked to screen coordinates. c drifts slowly so the
+    // underlying fractal still morphs.
+    let luma_warp = luma(r, g, b) - 0.5; // -0.5..0.5
+    let jx = (ctx.x as f32 - cx) / cx * 1.3 + luma_warp * 0.45;
+    let jy = (ctx.y as f32 - cy) / cy * 0.65 + luma_warp * 0.25;
     let jcx = -0.40 + (t * 0.07).sin() * 0.15;
     let jcy = 0.60 + (t * 0.05).cos() * 0.15;
     let jc = julia_escape(jx, jy, jcx, jcy);
@@ -209,13 +214,17 @@ fn lsd(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     let cy = ctx.rows as f32 * 0.5;
     let t = ctx.time;
 
-    // Julia iteration count field. Drifting c makes the fractal morph
-    // slowly through the edge region of the Mandelbrot set, which is where
-    // the most visually interesting boundaries live.
-    let jx = (ctx.x as f32 - cx) / cx * 1.5;
-    let jy = (ctx.y as f32 - cy) / cy * 0.75;
-    let jcx = -0.70 + (t * 0.06).sin() * 0.26;
-    let jcy = 0.27 + (t * 0.045).cos() * 0.26;
+    // Julia iteration count field with image-driven domain warp + small c
+    // modulation. Domain warp bends Julia coordinates by source luma so
+    // iso-lines curl around objects. c modulation means bright/dark regions
+    // render slightly different Julia shapes — the fractal "is" the object
+    // rather than sitting on top of it. Time drift keeps the overall shape
+    // morphing through the Mandelbrot edge region.
+    let luma_warp = luma(r, g, b) - 0.5;
+    let jx = (ctx.x as f32 - cx) / cx * 1.5 + luma_warp * 0.5;
+    let jy = (ctx.y as f32 - cy) / cy * 0.75 + luma_warp * 0.3;
+    let jcx = -0.70 + (t * 0.06).sin() * 0.26 + luma_warp * 0.12;
+    let jcy = 0.27 + (t * 0.045).cos() * 0.26 + luma_warp * 0.08;
     let jc = julia_escape(jx, jy, jcx, jcy);
 
     // Gentle secondary drift adds soft color motion inside the set.
