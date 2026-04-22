@@ -1,0 +1,19 @@
+[package]
+name = "terminal-cam"
+version = "0.1.0"
+edition = "2021"
+description = "ASCII-art webcam viewer for your terminal"
+
+[dependencies]
+nokhwa = { version = "0.10", features = ["input-native"] }
+crossterm = "0.28"
+anyhow = "1"
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
