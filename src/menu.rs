@@ -1,6 +1,6 @@
 //! Centered options overlay.
 
-use crate::{camera::CameraInfo, render::RenderConfig};
+use crate::{camera::CameraInfo, color::ColorDepth, render::RenderConfig};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fmt::Write as _;
 use std::io::Write;
@@ -9,6 +9,7 @@ pub struct MenuState {
     pub selected: usize,
     pub cameras: Vec<CameraInfo>,
     pub current_camera: u32,
+    pub detected_depth: ColorDepth,
 }
 
 pub enum Action {
@@ -17,14 +18,16 @@ pub enum Action {
     Quit,
     SwitchCamera(u32),
     CycleStyle(i32),
+    CycleDepth(i32),
     ToggleMirror,
     AdjustBrightness(f32),
     AdjustContrast(f32),
 }
 
-const ITEMS: [&str; 7] = [
+const ITEMS: [&str; 8] = [
     "Camera source",
     "Style",
+    "Color depth",
     "Mirror",
     "Brightness",
     "Contrast",
@@ -33,8 +36,8 @@ const ITEMS: [&str; 7] = [
 ];
 
 impl MenuState {
-    pub fn new(cameras: Vec<CameraInfo>, current_camera: u32) -> Self {
-        Self { selected: 0, cameras, current_camera }
+    pub fn new(cameras: Vec<CameraInfo>, current_camera: u32, detected_depth: ColorDepth) -> Self {
+        Self { selected: 0, cameras, current_camera, detected_depth }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
@@ -73,11 +76,12 @@ impl MenuState {
                 Action::SwitchCamera(idx)
             }
             1 => Action::CycleStyle(dir),
-            2 => Action::ToggleMirror,
-            3 => Action::AdjustBrightness(dir as f32 * 0.05),
-            4 => Action::AdjustContrast(dir as f32 * 0.1),
-            5 => Action::Close,
-            6 => Action::Quit,
+            2 => Action::CycleDepth(dir),
+            3 => Action::ToggleMirror,
+            4 => Action::AdjustBrightness(dir as f32 * 0.05),
+            5 => Action::AdjustContrast(dir as f32 * 0.1),
+            6 => Action::Close,
+            7 => Action::Quit,
             _ => Action::None,
         }
     }
@@ -127,9 +131,17 @@ pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16) -> std:
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| "(none)".into()),
             1 => cfg.style.label().to_string(),
-            2 => if cfg.mirror { "on".into() } else { "off".into() },
-            3 => format!("{:+.2}", cfg.brightness),
-            4 => format!("{:.1}", cfg.contrast),
+            2 => {
+                let resolved = cfg.depth.resolve(state.detected_depth);
+                if cfg.depth == ColorDepth::Auto {
+                    format!("auto · {}", resolved.label())
+                } else {
+                    cfg.depth.label().to_string()
+                }
+            }
+            3 => if cfg.mirror { "on".into() } else { "off".into() },
+            4 => format!("{:+.2}", cfg.brightness),
+            5 => format!("{:.1}", cfg.contrast),
             _ => String::new(),
         };
         let selected = i == state.selected;

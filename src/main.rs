@@ -1,5 +1,6 @@
 mod ascii;
 mod camera;
+mod color;
 mod menu;
 mod render;
 mod style;
@@ -28,7 +29,8 @@ fn main() -> Result<()> {
     let mut current_camera = cameras[0].index;
     let mut capture = camera::spawn_capture(current_camera)?;
     let mut cfg = render::RenderConfig::default();
-    let mut menu_state = menu::MenuState::new(cameras.clone(), current_camera);
+    let detected_depth = color::detect();
+    let mut menu_state = menu::MenuState::new(cameras.clone(), current_camera, detected_depth);
     let mut in_menu = false;
 
     enable_raw_mode()?;
@@ -45,6 +47,7 @@ fn main() -> Result<()> {
         &mut menu_state,
         &mut current_camera,
         &mut in_menu,
+        detected_depth,
     );
 
     execute!(
@@ -64,6 +67,7 @@ fn run(
     menu_state: &mut menu::MenuState,
     current_camera: &mut u32,
     in_menu: &mut bool,
+    detected_depth: color::ColorDepth,
 ) -> Result<()> {
     let frame_budget = Duration::from_micros(1_000_000 / TARGET_FPS as u64);
     let mut scratch = String::with_capacity(1 << 18);
@@ -93,6 +97,10 @@ fn run(
                             }
                             menu::Action::CycleStyle(dir) => {
                                 cfg.style = cfg.style.cycle(dir);
+                            }
+                            menu::Action::CycleDepth(dir) => {
+                                cfg.depth = cfg.depth.cycle(dir);
+                                execute!(stdout(), Clear(ClearType::All))?;
                             }
                             menu::Action::ToggleMirror => cfg.mirror = !cfg.mirror,
                             menu::Action::AdjustBrightness(d) => {
@@ -124,7 +132,7 @@ fn run(
         let time = start.elapsed().as_secs_f32();
         let frame_opt = capture.frame.lock().clone();
         if let Some(frame) = frame_opt {
-            render::render(&frame, cols, rows, cfg, time, &mut scratch);
+            render::render(&frame, cols, rows, cfg, detected_depth, time, &mut scratch);
             render::flush(&scratch)?;
         } else {
             let mut o = stdout().lock();

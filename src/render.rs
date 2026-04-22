@@ -14,14 +14,15 @@
 use crate::{
     ascii,
     camera::Frame,
+    color::{self, ColorDepth, Fg},
     style::{self, Style, StyleCtx},
 };
-use std::fmt::Write as _;
 use std::io::Write;
 
 #[derive(Clone, Copy)]
 pub struct RenderConfig {
     pub style: Style,
+    pub depth: ColorDepth,
     pub brightness: f32, // -1.0..=1.0, added as (brightness * 255) per channel
     pub contrast: f32,
     pub mirror: bool,
@@ -31,6 +32,7 @@ impl Default for RenderConfig {
     fn default() -> Self {
         Self {
             style: Style::Color,
+            depth: ColorDepth::Auto,
             brightness: 0.0,
             contrast: 1.2,
             mirror: true,
@@ -47,6 +49,7 @@ pub fn render(
     cols: u16,
     rows: u16,
     cfg: &RenderConfig,
+    detected_depth: ColorDepth,
     time: f32,
     out: &mut String,
 ) {
@@ -74,8 +77,9 @@ pub fn render(
     let cell_h = crop_h / rows as f32;
     let brightness_offset = (cfg.brightness * 255.0) as i32;
     let emit_color = cfg.style.emits_color();
+    let depth = cfg.depth.resolve(detected_depth);
 
-    let mut last_fg: Option<(u8, u8, u8)> = None;
+    let mut last_fg: Option<Fg> = None;
 
     for r in 0..rows {
         let y0 = (crop_y0 + r as f32 * cell_h) as usize;
@@ -114,9 +118,9 @@ pub fn render(
             let ch = ascii::luma_to_char(luma, cfg.contrast, emit_color);
 
             if emit_color {
-                let fg = (sr8, sg8, sb8);
+                let fg = color::quantize(depth, sr8, sg8, sb8);
                 if last_fg != Some(fg) {
-                    let _ = write!(out, "\x1b[38;2;{};{};{}m", sr8, sg8, sb8);
+                    fg.write(out);
                     last_fg = Some(fg);
                 }
             }

@@ -37,9 +37,24 @@ terminal application.
 
 - **Camera source** — cycle detected cameras
 - **Style** — `Full Color`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Mushroom`, `LSD`
+- **Color depth** — `auto` / `truecolor` / `256` / `16`. Auto-detects from
+  `COLORTERM`; falls back to 256-color for terminals like Apple Terminal.app
+  that don't speak 24-bit (see below)
 - **Mirror** — horizontal flip (on by default; webcams are usually mirrored)
 - **Brightness** — `-1.00` to `+1.00`, added to each RGB channel pre-style
 - **Contrast** — `0.1` to `3.0`, applied around 0.5 before the glyph curve
+
+## Terminal compatibility
+
+| Terminal              | Auto-detects as |
+| --------------------- | --------------- |
+| iTerm2, Warp, Kitty, Alacritty, Ghostty, WezTerm, VS Code | truecolor  |
+| Apple Terminal.app    | 256             |
+| anything with `TERM=*-256color` | 256   |
+
+If colors look wrong, the terminal probably doesn't support truecolor —
+open the menu and set **Color depth** to `256`. The image will show some
+banding but the colors will be correct.
 
 ## How it works
 
