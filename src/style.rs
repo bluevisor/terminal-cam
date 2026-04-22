@@ -1,18 +1,21 @@
 //! Color style transformations.
 //!
-//! Two families of transformations share one enum:
+//! Each style is a pure `(rgb, StyleCtx) -> rgb` function. The renderer
+//! calls it per cell per frame, so everything here needs to be cheap.
 //!
-//! 1. **Palette styles** (Sepia, VanGogh, Monet) — throw away the source hue
-//!    and look each pixel up in a 5-stop luminance gradient. This is why
-//!    they look "flat" — it's the same trick art directors use when
-//!    reducing reference photos to a limited palette.
+//! - **Sepia** — single affine RGB matrix.
+//! - **Van Gogh** — static palette snap. Source hue picks one of three
+//!   Van Gogh color ramps (cool / warm / green), source luma picks the
+//!   anchor within that ramp. No animation — the painting doesn't move.
+//! - **Monet** — pastelized HSV with a slow dappled-light mottle and
+//!   atmospheric warm/cool hue shift.
+//! - **Mushroom** — radial mandala (concentric rings + angular petals)
+//!   plus a slow-drifting Julia-set iteration field.
+//! - **LSD** — Julia-set iteration count drives hue rotation over the
+//!   source image; the c-parameter drifts slowly so the fractal morphs.
 //!
-//! 2. **Trippy styles** (Mushroom, Lsd) — preserve luminance but rotate hue
-//!    in HSV space over time and cell position. Converting to HSV for a
-//!    single rotation and back is cheaper than doing full LUTs.
-//!
-//! `Color` and `BlackWhite` are passthrough — the only difference is whether
-//! the renderer emits ANSI color escapes at all.
+//! `Color` and `BlackWhite` are passthrough — the only difference is
+//! whether the renderer emits ANSI color escapes at all.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Style {
@@ -38,7 +41,7 @@ pub const ALL: [Style; 7] = [
 impl Style {
     pub fn label(self) -> &'static str {
         match self {
-            Style::Color => "Full Color",
+            Style::Color => "Color",
             Style::BlackWhite => "B&W",
             Style::Sepia => "Sepia",
             Style::VanGogh => "Van Gogh",
@@ -63,6 +66,8 @@ pub struct StyleCtx {
     pub time: f32,
     pub x: u16,
     pub y: u16,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8) {
@@ -70,10 +75,10 @@ pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8
     match style {
         Style::Color | Style::BlackWhite => (r, g, b),
         Style::Sepia => sepia(r, g, b),
-        Style::VanGogh => gradient_map(r, g, b, &VAN_GOGH),
-        Style::Monet => gradient_map(r, g, b, &MONET),
-        Style::Mushroom => trippy(r, g, b, ctx, 40.0, 0.3, 1.2),
-        Style::Lsd => trippy(r, g, b, ctx, 220.0, 1.0, 0.7),
+        Style::VanGogh => van_gogh(r, g, b),
+        Style::Monet => monet(r, g, b, ctx),
+        Style::Mushroom => mushroom(r, g, b, ctx),
+        Style::Lsd => lsd(r, g, b, ctx),
     }
 }
 
@@ -88,62 +93,173 @@ fn sepia(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     (nr, ng, nb)
 }
 
-// ─── Luminance-gradient palette mapping ─────────────────────────────────────
-type Stop = (f32, [u8; 3]);
-
-static VAN_GOGH: [Stop; 5] = [
-    (0.0, [15, 27, 66]),      // Starry Night deep navy
-    (0.25, [41, 55, 110]),    // indigo
-    (0.5, [95, 84, 71]),      // earth brown
-    (0.75, [217, 178, 103]),  // gold
-    (1.0, [246, 228, 166]),   // cream
+// ─── Van Gogh: static palette snap ──────────────────────────────────────────
+//
+// Each ramp is a discrete sequence of anchor colors hand-picked from the
+// Irises / Starry Night / self-portrait palette. Source hue picks the ramp,
+// source luma picks the anchor within it. The output has at most
+// 3 ramps × 5 anchors = 15 distinct colors — which is roughly what a
+// painter's limited palette produces.
+const VG_COOL: [(u8, u8, u8); 5] = [
+    (12, 18, 54),    // ink-dark ultramarine (deep shadow)
+    (28, 52, 130),   // cobalt
+    (75, 125, 200),  // mid blue
+    (155, 195, 230), // pale verdigris
+    (220, 235, 240), // blue-white highlight (moon halo)
 ];
 
-static MONET: [Stop; 5] = [
-    (0.0, [70, 77, 99]),      // slate
-    (0.25, [120, 138, 161]),  // dusty blue
-    (0.5, [178, 196, 188]),   // sage
-    (0.75, [220, 196, 205]),  // pastel pink
-    (1.0, [243, 228, 215]),   // cream
+const VG_WARM: [(u8, u8, u8); 5] = [
+    (55, 30, 20),    // deep rust shadow
+    (140, 70, 35),   // terracotta
+    (210, 125, 40),  // warm orange
+    (235, 190, 60),  // saturated gold
+    (250, 235, 175), // cream highlight
 ];
 
-fn gradient_map(r: u8, g: u8, b: u8, stops: &[Stop]) -> (u8, u8, u8) {
-    let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
-    for pair in stops.windows(2) {
-        let (l0, c0) = pair[0];
-        let (l1, c1) = pair[1];
-        if luma <= l1 {
-            let t = ((luma - l0) / (l1 - l0)).clamp(0.0, 1.0);
-            return lerp_rgb(c0, c1, t);
-        }
-    }
-    let last = stops.last().unwrap().1;
-    (last[0], last[1], last[2])
+const VG_GREEN: [(u8, u8, u8); 5] = [
+    (55, 75, 40),    // deep moss
+    (100, 130, 70),  // moss
+    (155, 180, 125), // sage
+    (205, 220, 130), // yellow-green
+    (240, 240, 190), // pale yellow-cream
+];
+
+fn van_gogh(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let luma = luma(r, g, b);
+    let (hue, sat, _) = rgb_to_hsv(r, g, b);
+
+    // Low-chroma pixels go to the cool ramp so neutral source colour reads
+    // as the painting's overall blue-dominant cast. Warm/green/cool hue
+    // categories pick their respective ramps; no interpolation across the
+    // hue wheel means no muddy cyan/green midtones.
+    let ramp: &[(u8, u8, u8); 5] = if sat < 0.14 {
+        &VG_COOL
+    } else if !(65.0..330.0).contains(&hue) {
+        &VG_WARM
+    } else if hue < 180.0 {
+        &VG_GREEN
+    } else {
+        &VG_COOL
+    };
+
+    // Stretch luma so mid-exposure camera doesn't collapse into one band.
+    let stretched = smoothstep(0.08, 0.92, luma);
+    let idx = ((stretched * ramp.len() as f32) as usize).min(ramp.len() - 1);
+    ramp[idx]
 }
 
-fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> (u8, u8, u8) {
-    (
-        (a[0] as f32 + t * (b[0] as f32 - a[0] as f32)) as u8,
-        (a[1] as f32 + t * (b[1] as f32 - a[1] as f32)) as u8,
-        (a[2] as f32 + t * (b[2] as f32 - a[2] as f32)) as u8,
-    )
+// ─── Monet: pastel dapple with atmospheric warm/cool shift ──────────────────
+fn monet(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
+    let (mut h, s, v) = rgb_to_hsv(r, g, b);
+    let (x, y, t) = (ctx.x as f32, ctx.y as f32, ctx.time);
+    // Low-freq product-of-sines: slow "dappled light through leaves".
+    let dapple = (x * 0.13 + y * 0.11 + t * 0.25).sin()
+        * (x * 0.09 - y * 0.14 - t * 0.18).sin();
+
+    // Pastelize: cap saturation, lift gamma so mids bloom.
+    let sat = (s * 0.40 + 0.14).clamp(0.0, 1.0);
+    let val_mid = v.powf(0.65);
+
+    // Atmospheric: highlights → warm cream, shadows → cool violet;
+    // dapple wobbles hue so neighbours don't read as flat.
+    let hue_shift = (val_mid - 0.5) * -48.0 + dapple * 12.0;
+    h = (h + hue_shift).rem_euclid(360.0);
+
+    let val = (val_mid * (0.88 + 0.12 * dapple.abs())).clamp(0.0, 1.0);
+    hsv_to_rgb(h, sat, val)
 }
 
-// ─── Trippy: rotate hue over time + position, boost saturation ──────────────
-fn trippy(
-    r: u8,
-    g: u8,
-    b: u8,
-    ctx: &StyleCtx,
-    hue_per_sec: f32,
-    sat_boost: f32,
-    val_gain: f32,
-) -> (u8, u8, u8) {
+// ─── Mushroom: mandala + slow-drifting Julia-set overlay ────────────────────
+fn mushroom(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     let (mut h, mut s, mut v) = rgb_to_hsv(r, g, b);
-    h = (h + hue_per_sec * ctx.time + ctx.x as f32 * 3.0 + ctx.y as f32 * 2.0).rem_euclid(360.0);
-    s = (s + sat_boost).clamp(0.0, 1.0);
-    v = (v * val_gain).clamp(0.0, 1.0);
+    let cx = ctx.cols as f32 * 0.5;
+    let cy = ctx.rows as f32 * 0.5;
+    // Terminal cells are ~2:1 tall; pre-stretch y so rings look round.
+    let dx = ctx.x as f32 - cx;
+    let dy = (ctx.y as f32 - cy) * 2.0;
+    let radius = (dx * dx + dy * dy).sqrt();
+    let angle = dy.atan2(dx);
+    let t = ctx.time;
+
+    // Mandala: slowed by ~3× from the previous version.
+    let ring = ((radius * 0.3 - t * 0.85).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+    let petals = ((angle * 6.0 + t * 0.28).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+
+    // Julia-set iteration field. c drifts in a small loop so the fractal
+    // morphs smoothly rather than snapping between shapes. Coordinate
+    // space is the visible grid mapped to roughly [-1.3, 1.3].
+    let jx = (ctx.x as f32 - cx) / cx * 1.3;
+    let jy = (ctx.y as f32 - cy) / cy * 0.65;
+    let jcx = -0.40 + (t * 0.07).sin() * 0.15;
+    let jcy = 0.60 + (t * 0.05).cos() * 0.15;
+    let jc = julia_escape(jx, jy, jcx, jcy);
+
+    h = (h + 30.0 + ring * 90.0 + petals * 55.0 + jc * 140.0 + t * 8.0).rem_euclid(360.0);
+    s = (s + 0.20 + 0.22 * ring + 0.10 * jc).clamp(0.0, 1.0);
+    v = (v * (0.68 + 0.32 * (ring * 0.4 + petals * 0.25 + jc * 0.35))).clamp(0.0, 1.0);
+
     hsv_to_rgb(h, s, v)
+}
+
+// ─── LSD: Julia-set-driven hue storm ────────────────────────────────────────
+fn lsd(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
+    // Source saturation is discarded — LSD pins it near max.
+    let (h0, _, v0) = rgb_to_hsv(r, g, b);
+    let cx = ctx.cols as f32 * 0.5;
+    let cy = ctx.rows as f32 * 0.5;
+    let t = ctx.time;
+
+    // Julia iteration count field. Drifting c makes the fractal morph
+    // slowly through the edge region of the Mandelbrot set, which is where
+    // the most visually interesting boundaries live.
+    let jx = (ctx.x as f32 - cx) / cx * 1.5;
+    let jy = (ctx.y as f32 - cy) / cy * 0.75;
+    let jcx = -0.70 + (t * 0.06).sin() * 0.26;
+    let jcy = 0.27 + (t * 0.045).cos() * 0.26;
+    let jc = julia_escape(jx, jy, jcx, jcy);
+
+    // Gentle secondary drift adds soft color motion inside the set.
+    let (x, y) = (ctx.x as f32, ctx.y as f32);
+    let drift = ((x * 0.07 + y * 0.05 + t * 0.10).sin()
+        + (x * -0.04 + y * 0.08 - t * 0.08).sin())
+        * 0.5;
+
+    // jc*540 → the fractal boundary shows as visible hue bands (crossing the
+    // escape-count gradient sweeps through the whole hue wheel). Hue drift is
+    // slow (~18°/s) so the overall palette breathes instead of strobing.
+    let h = (h0 + t * 18.0 + jc * 540.0 + drift * 50.0).rem_euclid(360.0);
+    let s = (0.88 + drift * 0.10).clamp(0.0, 1.0);
+    let v = (v0 * (0.5 + 0.5 * jc) + 0.05).clamp(0.0, 1.0);
+
+    hsv_to_rgb(h, s, v)
+}
+
+// ─── Julia set escape-time iteration ────────────────────────────────────────
+/// Iterates z ← z² + c starting from (zx, zy). Returns the fraction of
+/// allowed iterations before |z| escapes 2. Inside the set → 1.0.
+fn julia_escape(zx: f32, zy: f32, cx: f32, cy: f32) -> f32 {
+    const MAX_ITER: u32 = 18;
+    let (mut x, mut y) = (zx, zy);
+    for i in 0..MAX_ITER {
+        let xn = x * x - y * y + cx;
+        let yn = 2.0 * x * y + cy;
+        if xn * xn + yn * yn > 4.0 {
+            return i as f32 / MAX_ITER as f32;
+        }
+        x = xn;
+        y = yn;
+    }
+    1.0
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+fn luma(r: u8, g: u8, b: u8) -> f32 {
+    (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
@@ -190,6 +306,10 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 mod tests {
     use super::*;
 
+    fn ctx() -> StyleCtx {
+        StyleCtx { time: 1.25, x: 12, y: 7, cols: 80, rows: 24 }
+    }
+
     #[test]
     fn cycle_wraps() {
         let mut s = Style::Color;
@@ -211,8 +331,12 @@ mod tests {
     }
 
     #[test]
-    fn gradient_endpoints() {
-        assert_eq!(gradient_map(0, 0, 0, &VAN_GOGH), (15, 27, 66));
-        assert_eq!(gradient_map(255, 255, 255, &VAN_GOGH), (246, 228, 166));
+    fn styles_dont_panic_on_extremes() {
+        let c = ctx();
+        for &(r, g, b) in &[(0u8, 0u8, 0u8), (255, 255, 255), (128, 64, 200)] {
+            for &style in &ALL {
+                let _ = transform(style, (r, g, b), &c);
+            }
+        }
     }
 }

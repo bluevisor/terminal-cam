@@ -103,7 +103,9 @@ pub fn quantize(depth: ColorDepth, r: u8, g: u8, b: u8) -> Fg {
         ColorDepth::Truecolor => Fg::Rgb(r, g, b),
         ColorDepth::Palette256 => Fg::Indexed(rgb_to_256(r, g, b)),
         ColorDepth::Ansi16 => Fg::Ansi(rgb_to_16(r, g, b)),
-        ColorDepth::Auto => Fg::Rgb(r, g, b), // caller should resolve first
+        ColorDepth::Auto => {
+            unreachable!("quantize requires a resolved depth; call ColorDepth::resolve first")
+        }
     }
 }
 

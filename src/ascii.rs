@@ -27,6 +27,15 @@ pub fn luma_to_char(luma: f32, contrast: f32, color: bool) -> char {
     RAMP[idx]
 }
 
+/// 5-stop Unicode shading ramp. Used for B&W + Blocks mode where there's
+/// no color channel to carry brightness, so the glyph itself must.
+pub fn luma_to_shade(luma: f32, contrast: f32) -> char {
+    const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
+    let boosted = ((luma - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+    let idx = (boosted * (SHADES.len() - 1) as f32).round() as usize;
+    SHADES[idx]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

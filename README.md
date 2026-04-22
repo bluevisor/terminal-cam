@@ -36,7 +36,7 @@ terminal application.
 ## Options menu
 
 - **Camera source** — cycle detected cameras
-- **Style** — `Full Color`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Mushroom`, `LSD`
+- **Style** — `Color`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Mushroom`, `LSD`
 - **Color depth** — `auto` / `truecolor` / `256` / `16`. Auto-detects from
   `COLORTERM`; falls back to 256-color for terminals like Apple Terminal.app
   that don't speak 24-bit (see below)
