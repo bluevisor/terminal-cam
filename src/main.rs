@@ -1,8 +1,10 @@
 mod ascii;
 mod camera;
 mod color;
+mod config;
 mod menu;
 mod render;
+mod screenshot;
 mod style;
 
 use anyhow::{anyhow, Result};
@@ -15,7 +17,8 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use std::io::{stdout, Write};
+use std::fmt::Write as FmtWrite;
+use std::io::{stdout, Write as IoWrite};
 use std::time::{Duration, Instant};
 
 const TARGET_FPS: u32 = 30;
@@ -32,7 +35,12 @@ fn main() -> Result<()> {
         detected: color::detect(),
         ..Default::default()
     };
-    let mut menu_state = menu::MenuState::new(cameras.clone(), current_camera);
+    let mut app_config = config::AppConfig::load()?;
+    let mut menu_state = menu::MenuState::new(
+        cameras.clone(),
+        current_camera,
+        app_config.screenshot_dir.clone(),
+    );
     let mut in_menu = false;
 
     enable_raw_mode()?;
@@ -49,6 +57,7 @@ fn main() -> Result<()> {
         &mut menu_state,
         &mut current_camera,
         &mut in_menu,
+        &mut app_config,
     );
 
     execute!(
@@ -68,18 +77,43 @@ fn run(
     menu_state: &mut menu::MenuState,
     current_camera: &mut u32,
     in_menu: &mut bool,
+    app_config: &mut config::AppConfig,
 ) -> Result<()> {
     let frame_budget = Duration::from_micros(1_000_000 / TARGET_FPS as u64);
     let mut scratch = String::with_capacity(1 << 18);
     let start = Instant::now();
+    let mut status: Option<StatusMessage> = None;
 
     loop {
         let loop_start = Instant::now();
+        let time = start.elapsed().as_secs_f32();
         let (cols, rows) = size().unwrap_or((80, 24));
 
         while poll(Duration::from_millis(0))? {
             match read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    if k.code == KeyCode::Char(' ') && !menu_state.is_editing_text() {
+                        let frame_opt = capture.frame.lock().clone();
+                        set_status(
+                            &mut status,
+                            match frame_opt {
+                                Some(frame) => match screenshot::save(
+                                    &frame,
+                                    cols,
+                                    rows,
+                                    cfg,
+                                    time,
+                                    &app_config.screenshot_dir,
+                                ) {
+                                    Ok(path) => format!("screenshot saved: {}", path.display()),
+                                    Err(err) => format!("screenshot failed: {err:#}"),
+                                },
+                                None => "screenshot failed: no camera frame yet".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     if *in_menu {
                         match menu_state.on_key(k) {
                             menu::Action::None => {}
@@ -113,6 +147,32 @@ fn run(
                             menu::Action::AdjustContrast(d) => {
                                 cfg.contrast = (cfg.contrast + d).clamp(0.1, 3.0);
                             }
+                            menu::Action::SetScreenshotDir(input) => {
+                                let mut next = app_config.clone();
+                                let result = next
+                                    .set_screenshot_dir_from_input(&input)
+                                    .and_then(|_| next.save());
+                                match result {
+                                    Ok(()) => {
+                                        *app_config = next;
+                                        menu_state
+                                            .set_screenshot_dir(app_config.screenshot_dir.clone());
+                                        set_status(
+                                            &mut status,
+                                            format!(
+                                                "screenshot path saved: {}",
+                                                app_config.screenshot_dir.display()
+                                            ),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        set_status(
+                                            &mut status,
+                                            format!("screenshot path failed: {err:#}"),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     } else {
                         match (k.code, k.modifiers) {
@@ -133,12 +193,21 @@ fn run(
             }
         }
 
-        let time = start.elapsed().as_secs_f32();
+        if status
+            .as_ref()
+            .is_some_and(|message| Instant::now() >= message.until)
+        {
+            status = None;
+        }
+
         let frame_opt = capture.frame.lock().clone();
         if let Some(frame) = frame_opt {
             render::render(&frame, cols, rows, cfg, time, &mut scratch);
             if *in_menu {
                 menu::draw(menu_state, cfg, cols, rows, &mut scratch);
+            }
+            if let Some(message) = &status {
+                draw_status(message, cols, rows, &mut scratch);
             }
             render::flush(&scratch)?;
         } else {
@@ -152,4 +221,33 @@ fn run(
             std::thread::sleep(frame_budget - elapsed);
         }
     }
+}
+
+struct StatusMessage {
+    text: String,
+    until: Instant,
+}
+
+fn set_status(status: &mut Option<StatusMessage>, text: String) {
+    *status = Some(StatusMessage {
+        text,
+        until: Instant::now() + Duration::from_secs(3),
+    });
+}
+
+fn draw_status(status: &StatusMessage, cols: u16, rows: u16, buf: &mut String) {
+    if cols == 0 || rows == 0 {
+        return;
+    }
+
+    let width = cols as usize;
+    let text: String = status.text.chars().take(width).collect();
+    let pad = width.saturating_sub(text.chars().count());
+    let _ = write!(
+        buf,
+        "\x1b[{};1H\x1b[7m{}{}\x1b[0m",
+        rows,
+        text,
+        " ".repeat(pad)
+    );
 }

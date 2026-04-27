@@ -12,6 +12,7 @@ nokhwa = { version = "0.10", features = ["input-native"] }
 crossterm = "0.28"
 anyhow = "1"
 parking_lot = "0.12"
+ab_glyph = "0.2"
 
 [profile.release]
 opt-level = 3

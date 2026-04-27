@@ -31,6 +31,7 @@ terminal application.
 | `↑` `↓`        | Select menu item    |
 | `←` `→`        | Change value        |
 | `Enter`        | Apply / advance     |
+| `Space`        | Save screenshot     |
 | `q` / `Ctrl-C` | Quit                |
 
 ## Options
@@ -57,6 +58,12 @@ terminal application.
 - **Contrast** — `0.1` to `3.0`. Applied to RGB upstream (not just to glyph
   density) so it affects the emitted color, Van Gogh palette-band
   selection, and Mushroom / LSD HSV value.
+- **Screenshot path** — directory used when pressing `Space`. Press `Enter`
+  or `→` on the row, type a path, then press `Enter` to save it to the app
+  config. `~` is expanded to your home directory.
+
+Screenshots are saved as PNG files using the current terminal crop, mirror,
+style, brightness, contrast, and render mode settings.
 
 ## Terminal compatibility
 
@@ -101,6 +108,8 @@ don't squash or stretch as you resize the window.
 - `src/main.rs` — input loop, terminal mode setup, frame pacing
 - `src/camera.rs` — `nokhwa` capture thread + shared frame slot
 - `src/render.rs` — per-cell render pipeline, config, synchronized output
+- `src/screenshot.rs` — screenshot capture + dependency-free PNG writing
+- `src/config.rs` — screenshot path config load/save
 - `src/style.rs` — style transforms (Sepia / Van Gogh / Monet / Mushroom /
   LSD) and the Julia-set iteration helper
 - `src/color.rs` — depth detection + truecolor / 256 / ANSI-16 quantization

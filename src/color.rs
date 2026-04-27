@@ -109,6 +109,14 @@ pub fn quantize(depth: ColorDepth, r: u8, g: u8, b: u8) -> Fg {
     }
 }
 
+pub fn quantize_rgb(depth: ColorDepth, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    match quantize(depth, r, g, b) {
+        Fg::Rgb(r, g, b) => (r, g, b),
+        Fg::Indexed(code) => indexed_to_rgb(code),
+        Fg::Ansi(code) => ansi_code_to_rgb(code),
+    }
+}
+
 // ─── 256-color: nearest of (6×6×6 cube) ∪ (24 grays) ────────────────────────
 const CUBE_STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
 
@@ -148,6 +156,27 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     }
 }
 
+fn indexed_to_rgb(code: u8) -> (u8, u8, u8) {
+    match code {
+        0..=15 => ANSI16[code as usize],
+        16..=231 => {
+            let idx = code - 16;
+            let r = idx / 36;
+            let g = (idx % 36) / 6;
+            let b = idx % 6;
+            (
+                CUBE_STEPS[r as usize],
+                CUBE_STEPS[g as usize],
+                CUBE_STEPS[b as usize],
+            )
+        }
+        232..=255 => {
+            let value = 8 + (code - 232) * 10;
+            (value, value, value)
+        }
+    }
+}
+
 // ─── 16-color ANSI: nearest fixed palette entry ─────────────────────────────
 const ANSI16: [(u8, u8, u8); 16] = [
     (0, 0, 0),
@@ -184,6 +213,14 @@ fn rgb_to_16(r: u8, g: u8, b: u8) -> u8 {
     }
 }
 
+fn ansi_code_to_rgb(code: u8) -> (u8, u8, u8) {
+    match code {
+        30..=37 => ANSI16[(code - 30) as usize],
+        90..=97 => ANSI16[(code - 90 + 8) as usize],
+        _ => ANSI16[7],
+    }
+}
+
 fn dist_sq(a0: u8, a1: u8, a2: u8, b0: u8, b1: u8, b2: u8) -> u32 {
     let d0 = a0 as i32 - b0 as i32;
     let d1 = a1 as i32 - b1 as i32;
@@ -216,5 +253,14 @@ mod tests {
         // 128,128,128 is closer to gray-ramp index ~244 than cube (2,2,2)=139,139,139.
         let idx = rgb_to_256(128, 128, 128);
         assert!(idx >= 232, "expected gray ramp, got {idx}");
+    }
+
+    #[test]
+    fn quantized_rgb_matches_palette_color() {
+        assert_eq!(quantize_rgb(ColorDepth::Palette256, 255, 0, 0), (255, 0, 0));
+        assert_eq!(
+            quantize_rgb(ColorDepth::Ansi16, 255, 255, 255),
+            (255, 255, 255)
+        );
     }
 }
