@@ -88,9 +88,56 @@ impl RenderConfig {
     }
 }
 
+/// Per-frame state that survives between renders. Currently used only by
+/// LSD's afterimage feedback buffer — the live render loop owns one of these
+/// and passes a mutable reference into `render`. Reset whenever the terminal
+/// resizes or the active style changes, so trails never leak across modes.
+pub struct RenderState {
+    trails: Vec<(u8, u8, u8)>,
+    cols: u16,
+    rows: u16,
+    last_style: Option<Style>,
+}
+
+impl RenderState {
+    pub fn new() -> Self {
+        Self {
+            trails: Vec::new(),
+            cols: 0,
+            rows: 0,
+            last_style: None,
+        }
+    }
+
+    fn prepare(&mut self, cols: u16, rows: u16, style: Style) {
+        let needed = (cols as usize).saturating_mul(rows as usize);
+        let resized = self.cols != cols || self.rows != rows;
+        let style_changed = self.last_style != Some(style);
+        if resized || style_changed || self.trails.len() != needed {
+            self.trails.clear();
+            self.trails.resize(needed, (0, 0, 0));
+            self.cols = cols;
+            self.rows = rows;
+        }
+        self.last_style = Some(style);
+    }
+}
+
+impl Default for RenderState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Approximate terminal cell height-to-width ratio. Most fonts land near 2.0;
 /// tweak here if your terminal renders tall (more like 2.2) or square (1.6).
 const CHAR_ASPECT: f32 = 2.0;
+
+/// LSD afterimage retention. 0.85 means each frame keeps 85% of the previous
+/// cell color and adds 15% of the fresh value — half-life ≈ 4.3 frames at
+/// 30 FPS (~140 ms). Static scenes converge to the steady-state color so they
+/// stay sharp; motion smears across the decay window.
+const LSD_TRAIL_DECAY: f32 = 0.85;
 const SCREENSHOT_CELL_WIDTH: usize = 8;
 const SCREENSHOT_CELL_HEIGHT: usize = 16;
 const SCREENSHOT_FONT_SCALE: f32 = 15.0;
@@ -152,6 +199,7 @@ pub fn render(
     rows: u16,
     cfg: &RenderConfig,
     time: f32,
+    state: &mut RenderState,
     out: &mut String,
 ) {
     out.clear();
@@ -163,15 +211,20 @@ pub fn render(
     let Some(geometry) = RenderGeometry::new(frame, cols, rows) else {
         return;
     };
+    state.prepare(cols, rows, cfg.style);
     let depth = cfg.effective_depth();
     let mut last_fg: Option<Fg> = None;
 
     for r in 0..rows {
         for c in 0..cols {
-            let Some(cell) = sample_cell(frame, &geometry, c, r, cfg, time) else {
+            let Some(mut cell) = sample_cell(frame, &geometry, c, r, cfg, time) else {
                 out.push(' ');
                 continue;
             };
+
+            if cfg.style == Style::Lsd {
+                apply_lsd_trail(&mut cell, state, cols, c, r, cfg);
+            }
 
             if cell.emit_color {
                 let fg = color::quantize(depth, cell.rgb.0, cell.rgb.1, cell.rgb.2);
@@ -390,48 +443,76 @@ fn sample_cell(
     cfg: &RenderConfig,
     time: f32,
 ) -> Option<RenderedCell> {
-    let y0 = (geometry.crop_y0 + r as f32 * geometry.cell_h) as usize;
-    let y1 = (geometry.crop_y0 + (r + 1) as f32 * geometry.cell_h).min(geometry.fh as f32) as usize;
-    let cx = if cfg.mirror { geometry.cols - 1 - c } else { c };
-    let x0 = (geometry.crop_x0 + cx as f32 * geometry.cell_w) as usize;
-    let x1 =
-        (geometry.crop_x0 + (cx + 1) as f32 * geometry.cell_w).min(geometry.fw as f32) as usize;
+    let (warp_dx_px, warp_dy_px) = if cfg.style == Style::Mushroom {
+        mushroom_warp_pixels(geometry, c, r, time, cfg.mirror)
+    } else {
+        (0.0, 0.0)
+    };
 
-    let (mut sr, mut sg, mut sb, mut n) = (0u64, 0u64, 0u64, 0u64);
-    for y in y0..y1 {
-        let row_off = y * geometry.fw * 3;
-        for x in x0..x1 {
-            let i = row_off + x * 3;
-            sr += frame.rgb[i] as u64;
-            sg += frame.rgb[i + 1] as u64;
-            sb += frame.rgb[i + 2] as u64;
-            n += 1;
+    let cx = if cfg.mirror { geometry.cols - 1 - c } else { c };
+
+    // Mushroom samples each channel at a different offset for radial
+    // chromatic aberration; everything else uses one shared block average.
+    let (raw_r, raw_g, raw_b) = if cfg.style == Style::Mushroom {
+        let (ca_dx, ca_dy) = mushroom_ca_offset_pixels(geometry, c, r, time, cfg.mirror);
+        let r_avg =
+            sample_channel_avg(frame, geometry, cx, r, warp_dx_px + ca_dx, warp_dy_px + ca_dy, 0);
+        let g_avg = sample_channel_avg(frame, geometry, cx, r, warp_dx_px, warp_dy_px, 1);
+        let b_avg =
+            sample_channel_avg(frame, geometry, cx, r, warp_dx_px - ca_dx, warp_dy_px - ca_dy, 2);
+        (r_avg, g_avg, b_avg)
+    } else {
+        let raw_y0 = geometry.crop_y0 + r as f32 * geometry.cell_h + warp_dy_px;
+        let raw_y1 = geometry.crop_y0 + (r + 1) as f32 * geometry.cell_h + warp_dy_px;
+        let raw_x0 = geometry.crop_x0 + cx as f32 * geometry.cell_w + warp_dx_px;
+        let raw_x1 = geometry.crop_x0 + (cx + 1) as f32 * geometry.cell_w + warp_dx_px;
+        let y0 = raw_y0.clamp(0.0, geometry.fh as f32) as usize;
+        let y1 = raw_y1.clamp(0.0, geometry.fh as f32) as usize;
+        let x0 = raw_x0.clamp(0.0, geometry.fw as f32) as usize;
+        let x1 = raw_x1.clamp(0.0, geometry.fw as f32) as usize;
+
+        let (mut sr, mut sg, mut sb, mut n) = (0u64, 0u64, 0u64, 0u64);
+        for y in y0..y1 {
+            let row_off = y * geometry.fw * 3;
+            for x in x0..x1 {
+                let i = row_off + x * 3;
+                sr += frame.rgb[i] as u64;
+                sg += frame.rgb[i + 1] as u64;
+                sb += frame.rgb[i + 2] as u64;
+                n += 1;
+            }
         }
-    }
-    if n == 0 {
-        return None;
-    }
+        if n == 0 {
+            return None;
+        }
+        ((sr / n) as u8, (sg / n) as u8, (sb / n) as u8)
+    };
 
     let brightness_offset = (cfg.brightness * 255.0) as i32;
     let avg_r = contrast_u8(
-        clamp_u8(((sr / n) as i32) + brightness_offset),
+        clamp_u8(raw_r as i32 + brightness_offset),
         cfg.contrast,
     );
     let avg_g = contrast_u8(
-        clamp_u8(((sg / n) as i32) + brightness_offset),
+        clamp_u8(raw_g as i32 + brightness_offset),
         cfg.contrast,
     );
     let avg_b = contrast_u8(
-        clamp_u8(((sb / n) as i32) + brightness_offset),
+        clamp_u8(raw_b as i32 + brightness_offset),
         cfg.contrast,
     );
 
+    let (edge_x, edge_y, edge) =
+        sample_edge(frame, geometry, c, r, cfg.mirror, warp_dx_px, warp_dy_px);
     let ctx = StyleCtx {
         time,
         x: c,
         y: r,
         cols: geometry.cols,
         rows: geometry.rows,
+        edge_x,
+        edge_y,
+        edge,
     };
     let rgb = style::transform(cfg.style, (avg_r, avg_g, avg_b), &ctx);
     let luma = (0.299 * rgb.0 as f32 + 0.587 * rgb.1 as f32 + 0.114 * rgb.2 as f32) / 255.0;
@@ -449,6 +530,220 @@ fn sample_cell(
         ch,
         emit_color,
     })
+}
+
+/// Mushroom radial chromatic aberration: per-channel sampling offset that
+/// grows from the screen center outward, sub-linear in radius so even
+/// mid-frame cells get a clear fringe. R is sampled along +radial, B along
+/// -radial, G unshifted — classic lens-CA polarity.
+///
+/// Magnitude breathes: a ~7 s sine cycles the corner peak between
+/// ~0.8 cells (mild fringe) and ~8.3 cells (heavy splay). The motion is
+/// what the user perceives as the image "breathing" in and out of focus.
+fn mushroom_ca_offset_pixels(
+    geometry: &RenderGeometry,
+    c: u16,
+    r: u16,
+    time: f32,
+    mirror: bool,
+) -> (f32, f32) {
+    let cx_center = geometry.cols as f32 * 0.5;
+    let cy_center = geometry.rows as f32 * 0.5;
+    let dx = (c as f32 + 0.5) - cx_center;
+    let dy = (r as f32 + 0.5) - cy_center;
+    let r_dist_sq = dx * dx + dy * dy;
+    if r_dist_sq < 1.0 {
+        return (0.0, 0.0);
+    }
+    let r_dist = r_dist_sq.sqrt();
+    let r_max = (cx_center * cx_center + cy_center * cy_center).sqrt().max(1.0);
+
+    // Breath: 0..1 sine at ~0.85 rad/s → period ≈ 7.4 s. Lifts the peak
+    // amplitude from a calm baseline to a heavy splay and back.
+    let breath = (time * 0.85).sin() * 0.5 + 0.5;
+    let peak_cells = 0.8 + 7.5 * breath;
+    // sqrt-shaped radial falloff: cells halfway out already get ~70% of peak,
+    // so the fringes are visible across most of the frame, not just corners.
+    let amount_cells = peak_cells * (r_dist / r_max).sqrt();
+    let nx = dx / r_dist;
+    let ny = dy / r_dist;
+
+    let mut ox = nx * amount_cells * geometry.cell_w;
+    if mirror {
+        ox = -ox;
+    }
+    let oy = ny * amount_cells * geometry.cell_h;
+    (ox, oy)
+}
+
+/// Block-average a single channel of the source frame over the cell's
+/// (warp + per-channel) sampling window. The window is *edge-clamped*: when
+/// the offset pushes its start past either edge of the frame, we slide the
+/// whole window back so it samples the nearest in-bounds region at full
+/// width. That produces a stretched border instead of a black fringe at
+/// the screen edges (returning 0 here meant any channel pushed off-frame
+/// dropped to zero independently, which the user saw as black leaking in).
+fn sample_channel_avg(
+    frame: &Frame,
+    geometry: &RenderGeometry,
+    cx_src: u16,
+    r: u16,
+    dx_px: f32,
+    dy_px: f32,
+    channel: usize,
+) -> u8 {
+    let raw_y0 = geometry.crop_y0 + r as f32 * geometry.cell_h + dy_px;
+    let raw_x0 = geometry.crop_x0 + cx_src as f32 * geometry.cell_w + dx_px;
+    let win_w = geometry.cell_w.max(1.0);
+    let win_h = geometry.cell_h.max(1.0);
+
+    let max_x_start = (geometry.fw as f32 - win_w).max(0.0);
+    let max_y_start = (geometry.fh as f32 - win_h).max(0.0);
+    let x0_f = raw_x0.clamp(0.0, max_x_start);
+    let y0_f = raw_y0.clamp(0.0, max_y_start);
+    let x0 = x0_f as usize;
+    let y0 = y0_f as usize;
+    let x1 = (x0_f + win_w).min(geometry.fw as f32) as usize;
+    let y1 = (y0_f + win_h).min(geometry.fh as f32) as usize;
+
+    let (mut s, mut n) = (0u64, 0u64);
+    for y in y0..y1 {
+        let row_off = y * geometry.fw * 3;
+        for x in x0..x1 {
+            s += frame.rgb[row_off + x * 3 + channel] as u64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0
+    } else {
+        (s / n) as u8
+    }
+}
+
+/// Mushroom UV warp: shift each cell's source-frame sampling position by a
+/// domain-warped two-octave sine field. The first octave is a coarse, slow
+/// sine pair (dx depends on display-y, dy on display-x — so vertical edges
+/// curl horizontally and horizontal edges wave vertically as the cursor
+/// advances). The second octave is sampled in coordinates already displaced
+/// by the first, which is the classic trick that produces fractal-layered
+/// (Inigo-Quilez-style) noise on the cheap. Net amplitude ~3.7 cells so the
+/// distortion is clearly visible while still preserving image content.
+/// We flip dx under mirror so the curl direction matches what's drawn.
+fn mushroom_warp_pixels(
+    geometry: &RenderGeometry,
+    c: u16,
+    r: u16,
+    time: f32,
+    mirror: bool,
+) -> (f32, f32) {
+    let cols_f = geometry.cols.max(1) as f32;
+    let rows_f = geometry.rows.max(1) as f32;
+    let nx = (c as f32 + 0.5) / cols_f * 2.0 - 1.0;
+    let ny = (r as f32 + 0.5) / rows_f * 2.0 - 1.0;
+
+    let amp1 = 1.2;
+    let dx1 = (ny * 2.2 + time * 0.55).sin() * amp1;
+    let dy1 = (nx * 2.5 + time * 0.45).sin() * amp1;
+
+    // Domain-warped second octave: feed the first warp's output back into
+    // the input coordinates of a higher-frequency sine pair. The recursive
+    // displacement breaks the regularity of pure sines and reads as fractal
+    // bending rather than a smooth wave.
+    let nx2 = nx + dx1 * 0.10;
+    let ny2 = ny + dy1 * 0.10;
+    let amp2 = 0.5;
+    let dx2 = (ny2 * 5.5 - time * 0.70).sin() * amp2;
+    let dy2 = (nx2 * 5.8 + time * 0.60).sin() * amp2;
+
+    let dx_cells = dx1 + dx2;
+    let dy_cells = dy1 + dy2;
+
+    let mut dx_px = dx_cells * geometry.cell_w;
+    if mirror {
+        dx_px = -dx_px;
+    }
+    let dy_px = dy_cells * geometry.cell_h;
+    (dx_px, dy_px)
+}
+
+/// LSD afterimage: alpha-blend the freshly computed cell color against the
+/// trail buffer, write the blend back into both the cell and the buffer, and
+/// recompute the glyph from the blended luma so ASCII shading also fades
+/// with the trail.
+fn apply_lsd_trail(
+    cell: &mut RenderedCell,
+    state: &mut RenderState,
+    cols: u16,
+    c: u16,
+    r: u16,
+    cfg: &RenderConfig,
+) {
+    let idx = (r as usize) * (cols as usize) + (c as usize);
+    let prev = state.trails[idx];
+    let blended = blend_rgb(prev, cell.rgb, LSD_TRAIL_DECAY);
+    state.trails[idx] = blended;
+    cell.rgb = blended;
+
+    let luma = (0.299 * blended.0 as f32
+        + 0.587 * blended.1 as f32
+        + 0.114 * blended.2 as f32)
+        / 255.0;
+    cell.ch = match cfg.mode {
+        RenderMode::Ascii => ascii::luma_to_char(luma, cfg.contrast, true),
+        RenderMode::Blocks => '█',
+    };
+}
+
+fn blend_rgb(prev: (u8, u8, u8), new: (u8, u8, u8), decay: f32) -> (u8, u8, u8) {
+    let mix = |p: u8, n: u8| -> u8 {
+        (p as f32 * decay + n as f32 * (1.0 - decay))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (mix(prev.0, new.0), mix(prev.1, new.1), mix(prev.2, new.2))
+}
+
+/// Central-difference luma gradient at the cell's center pixel, with a
+/// neighbour offset of one cell-width/-height. Returns `(gx, gy, magnitude)`
+/// in normalized image-luma units (channels divided by 255). Magnitude is
+/// clamped to [0, 1].
+///
+/// We mirror the X axis when the camera output is mirrored so the gradient
+/// matches what's drawn on screen — otherwise edge-driven fractals would
+/// warp opposite to the visible image.
+fn sample_edge(
+    frame: &Frame,
+    geometry: &RenderGeometry,
+    c: u16,
+    r: u16,
+    mirror: bool,
+    warp_dx_px: f32,
+    warp_dy_px: f32,
+) -> (f32, f32, f32) {
+    let cx = if mirror { geometry.cols - 1 - c } else { c };
+    let center_x = geometry.crop_x0 + (cx as f32 + 0.5) * geometry.cell_w + warp_dx_px;
+    let center_y = geometry.crop_y0 + (r as f32 + 0.5) * geometry.cell_h + warp_dy_px;
+    let step_x = geometry.cell_w.max(1.0);
+    let step_y = geometry.cell_h.max(1.0);
+
+    let luma_at = |x: f32, y: f32| -> f32 {
+        let xi = x.clamp(0.0, geometry.fw as f32 - 1.0) as usize;
+        let yi = y.clamp(0.0, geometry.fh as f32 - 1.0) as usize;
+        let i = (yi * geometry.fw + xi) * 3;
+        let pr = frame.rgb[i] as f32;
+        let pg = frame.rgb[i + 1] as f32;
+        let pb = frame.rgb[i + 2] as f32;
+        (0.299 * pr + 0.587 * pg + 0.114 * pb) / 255.0
+    };
+
+    let mut gx = luma_at(center_x + step_x, center_y) - luma_at(center_x - step_x, center_y);
+    let gy = luma_at(center_x, center_y + step_y) - luma_at(center_x, center_y - step_y);
+    if mirror {
+        gx = -gx;
+    }
+    let mag = (gx * gx + gy * gy).sqrt().min(1.0);
+    (gx, gy, mag)
 }
 
 fn clamp_u8(v: i32) -> u8 {
