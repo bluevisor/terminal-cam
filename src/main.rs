@@ -253,8 +253,13 @@ fn run(
             }
             render::flush(&scratch)?;
         } else {
+            let msg = capture
+                .error
+                .lock()
+                .clone()
+                .unwrap_or_else(|| "waiting for camera…".to_string());
             let mut o = stdout().lock();
-            write!(o, "\x1b[H\x1b[0mwaiting for camera…\x1b[0K")?;
+            write!(o, "\x1b[H\x1b[0m{msg}\x1b[0K")?;
             o.flush()?;
         }
 

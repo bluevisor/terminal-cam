@@ -9,6 +9,12 @@
 //!   while still emitting ANSI color escapes so the renderer treats the
 //!   cell as a color cell rather than a no-color glyph.
 //! - **Sepia** — single affine RGB matrix.
+//! - **Infrared** — fake thermal palette. Skin-tone HSV gate plus a
+//!   frame-difference motion accumulator (`StyleCtx.motion`) drive a heat
+//!   mask; the inverse-luma branch makes darker skin glow brighter (real
+//!   thermal cams read body heat regardless of optical brightness). Final
+//!   RGB lerps through Matplotlib's inferno colormap (black → purple → red
+//!   → orange → pale yellow). No ML — heuristic only.
 //! - **Van Gogh** — static palette snap. Source hue picks one of three
 //!   Van Gogh color ramps (cool / warm / green), source luma picks the
 //!   anchor within that ramp. No animation — the painting doesn't move.
@@ -37,18 +43,20 @@ pub enum Style {
     BlackWhite,
     Grayscale,
     Sepia,
+    Infrared,
     VanGogh,
     Monet,
     Alice,
     Lucy,
 }
 
-pub const ALL: [Style; 9] = [
+pub const ALL: [Style; 10] = [
     Style::Color,
     Style::Vivid,
     Style::BlackWhite,
     Style::Grayscale,
     Style::Sepia,
+    Style::Infrared,
     Style::VanGogh,
     Style::Monet,
     Style::Alice,
@@ -63,6 +71,7 @@ impl Style {
             Style::BlackWhite => "B&W",
             Style::Grayscale => "Grayscale",
             Style::Sepia => "Sepia",
+            Style::Infrared => "Infrared",
             Style::VanGogh => "Van Gogh",
             Style::Monet => "Monet",
             Style::Alice => "Alice",
@@ -94,6 +103,10 @@ pub struct StyleCtx {
     pub edge_y: f32,
     /// Edge magnitude `sqrt(edge_x² + edge_y²)`, clamped to [0, 1].
     pub edge: f32,
+    /// Frame-difference motion accumulator at this cell, [0, 1]. Persistent
+    /// across frames in `RenderState` with exponential decay so brief motion
+    /// fades over ~10 frames; used by Infrared to add heat to moving regions.
+    pub motion: f32,
 }
 
 pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8) {
@@ -103,6 +116,7 @@ pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8
         Style::Vivid => vivid(r, g, b),
         Style::Grayscale => grayscale(r, g, b),
         Style::Sepia => sepia(r, g, b),
+        Style::Infrared => infrared(r, g, b, ctx),
         Style::VanGogh => van_gogh(r, g, b),
         Style::Monet => monet(r, g, b, ctx),
         Style::Alice => alice(r, g, b, ctx),
@@ -135,6 +149,68 @@ fn sepia(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     let ng = (0.349 * rf + 0.686 * gf + 0.168 * bf).min(255.0) as u8;
     let nb = (0.272 * rf + 0.534 * gf + 0.131 * bf).min(255.0) as u8;
     (nr, ng, nb)
+}
+
+// ─── Infrared: skin-tone heat over inferno thermal palette ──────────────────
+//
+// Anchor stops sampled from Matplotlib's inferno colormap (perceptually
+// uniform luminance ramp, classic "black-body" feel for thermal imagery).
+const INFERNO: [(f32, (u8, u8, u8)); 9] = [
+    (0.000, (0, 0, 4)),
+    (0.125, (40, 11, 84)),
+    (0.250, (101, 21, 110)),
+    (0.375, (159, 42, 99)),
+    (0.500, (212, 72, 66)),
+    (0.625, (245, 125, 21)),
+    (0.750, (250, 193, 39)),
+    (0.875, (252, 236, 100)),
+    (1.000, (252, 255, 164)),
+];
+
+fn infrared(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
+    let (h, s, v) = rgb_to_hsv(r, g, b);
+    let luma = luma(r, g, b);
+
+    // Skin-tone gate: red-orange hue band, moderate saturation/value.
+    // Confidence peaks near (s≈0.4, v≈0.6) and decays at the box edges.
+    let in_hue = h <= 50.0 || h >= 340.0;
+    let skin = if !in_hue || !(0.15..=0.7).contains(&s) || !(0.25..=0.95).contains(&v) {
+        0.0
+    } else {
+        let s_conf = 1.0 - (s - 0.4).abs() / 0.3;
+        let v_conf = 1.0 - (v - 0.6).abs() / 0.4;
+        (s_conf * v_conf).clamp(0.0, 1.0)
+    };
+
+    // Combined heat sources. Skin alone can fully saturate; motion contributes
+    // up to ~0.6 so it warms the background without overpowering actual skin.
+    let heat = (skin + ctx.motion * 0.6).clamp(0.0, 1.0);
+
+    // Cool baseline (no heat): temp tracks source luma, dark = near-black.
+    // Hot target (skin/motion): inverts luma so darker pixels glow *brighter*
+    // — a real thermal cam reads body heat uniformly regardless of optical
+    // brightness, so a face in shadow should still light up the palette.
+    let cool = luma * 0.30;
+    let hot = 0.70 + (1.0 - luma) * 0.20;
+    let temp = (cool * (1.0 - heat) + hot * heat).clamp(0.0, 1.0);
+    inferno_lerp(temp)
+}
+
+fn inferno_lerp(t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    for window in INFERNO.windows(2) {
+        let (t0, c0) = window[0];
+        let (t1, c1) = window[1];
+        if t <= t1 {
+            let f = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            return (
+                (c0.0 as f32 + (c1.0 as f32 - c0.0 as f32) * f) as u8,
+                (c0.1 as f32 + (c1.1 as f32 - c0.1 as f32) * f) as u8,
+                (c0.2 as f32 + (c1.2 as f32 - c0.2 as f32) * f) as u8,
+            );
+        }
+    }
+    INFERNO[INFERNO.len() - 1].1
 }
 
 // ─── Van Gogh: static palette snap ──────────────────────────────────────────
@@ -386,6 +462,7 @@ mod tests {
             edge_x: 0.4,
             edge_y: -0.3,
             edge: 0.5,
+            motion: 0.2,
         }
     }
 

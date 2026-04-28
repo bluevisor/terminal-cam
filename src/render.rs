@@ -88,12 +88,18 @@ impl RenderConfig {
     }
 }
 
-/// Per-frame state that survives between renders. Currently used only by
-/// Lucy's afterimage feedback buffer — the live render loop owns one of these
-/// and passes a mutable reference into `render`. Reset whenever the terminal
-/// resizes or the active style changes, so trails never leak across modes.
+/// Per-frame state that survives between renders. Currently used by
+/// Lucy's afterimage feedback buffer and Infrared's motion accumulator.
+/// The live render loop owns one of these and passes a mutable reference
+/// into `render`. Reset whenever the terminal resizes or the active style
+/// changes, so trails / motion never leak across modes.
 pub struct RenderState {
     trails: Vec<(u8, u8, u8)>,
+    /// Previous-frame block-average luma per cell, scaled to `[0, 255]`.
+    prev_luma: Vec<u8>,
+    /// Motion accumulator per cell, `[0, 1]`. Decays each frame; rises with
+    /// frame-to-frame luma difference.
+    motion: Vec<f32>,
     cols: u16,
     rows: u16,
     last_style: Option<Style>,
@@ -103,6 +109,8 @@ impl RenderState {
     pub fn new() -> Self {
         Self {
             trails: Vec::new(),
+            prev_luma: Vec::new(),
+            motion: Vec::new(),
             cols: 0,
             rows: 0,
             last_style: None,
@@ -116,6 +124,10 @@ impl RenderState {
         if resized || style_changed || self.trails.len() != needed {
             self.trails.clear();
             self.trails.resize(needed, (0, 0, 0));
+            self.prev_luma.clear();
+            self.prev_luma.resize(needed, 0);
+            self.motion.clear();
+            self.motion.resize(needed, 0.0);
             self.cols = cols;
             self.rows = rows;
         }
@@ -138,6 +150,11 @@ const CHAR_ASPECT: f32 = 2.0;
 /// 30 FPS (~140 ms). Static scenes converge to the steady-state color so they
 /// stay sharp; motion smears across the decay window.
 const LUCY_TRAIL_DECAY: f32 = 0.85;
+
+/// Infrared motion accumulator decay. 0.92 → half-life ~8 frames (~270 ms at
+/// 30 FPS). New motion energy is added as `diff * MOTION_GAIN` capped to 1.0.
+const MOTION_DECAY: f32 = 0.92;
+const MOTION_GAIN: f32 = 2.0;
 const SCREENSHOT_CELL_WIDTH: usize = 8;
 const SCREENSHOT_CELL_HEIGHT: usize = 16;
 const SCREENSHOT_FONT_SCALE: f32 = 15.0;
@@ -229,15 +246,19 @@ pub fn render(
         while c < cols {
             if let Some((mx0, mx1)) = row_mask {
                 if c == mx0 {
-                    // Decay the Lucy trail buffer under the masked rectangle so
-                    // those cells fade naturally while the menu is open. Without
-                    // this, masked cells keep their pre-menu trail values, and a
-                    // ghost rectangle pops back when the menu closes.
-                    if cfg.style == Style::Lucy {
-                        for skip_c in mx0..mx1 {
-                            let idx = (r as usize) * (cols as usize) + (skip_c as usize);
+                    // Decay style-specific persistent buffers for masked cells
+                    // so they fade naturally while the menu is open. Without
+                    // this, stale values pop back when the menu closes — Lucy
+                    // gets a ghost rectangle and Infrared keeps phantom motion
+                    // heat under the menu.
+                    for skip_c in mx0..mx1 {
+                        let idx = (r as usize) * (cols as usize) + (skip_c as usize);
+                        if cfg.style == Style::Lucy {
                             state.trails[idx] =
                                 blend_rgb(state.trails[idx], (0, 0, 0), LUCY_TRAIL_DECAY);
+                        }
+                        if cfg.style == Style::Infrared {
+                            state.motion[idx] *= MOTION_DECAY;
                         }
                     }
                     let _ = write!(out, "\x1b[{}C", mx1 - mx0);
@@ -246,7 +267,7 @@ pub fn render(
                 }
             }
 
-            let Some(mut cell) = sample_cell(frame, &geometry, c, r, cfg, time) else {
+            let Some(mut cell) = sample_cell(frame, &geometry, c, r, cfg, time, Some(state)) else {
                 out.push(' ');
                 c += 1;
                 continue;
@@ -299,7 +320,7 @@ pub fn render_screenshot(
 
     for cell_y in 0..rows {
         for cell_x in 0..cols {
-            if let Some(cell) = sample_cell(frame, &geometry, cell_x, cell_y, cfg, time) {
+            if let Some(cell) = sample_cell(frame, &geometry, cell_x, cell_y, cfg, time, None) {
                 let color = if cell.emit_color {
                     color::quantize_rgb(cfg.effective_depth(), cell.rgb.0, cell.rgb.1, cell.rgb.2)
                 } else {
@@ -478,6 +499,7 @@ fn sample_cell(
     r: u16,
     cfg: &RenderConfig,
     time: f32,
+    state: Option<&mut RenderState>,
 ) -> Option<RenderedCell> {
     let (warp_dx_px, warp_dy_px) = if cfg.style == Style::Alice {
         alice_warp_pixels(geometry, c, r, time, cfg.mirror)
@@ -540,6 +562,23 @@ fn sample_cell(
 
     let (edge_x, edge_y, edge) =
         sample_edge(frame, geometry, c, r, cfg.mirror, warp_dx_px, warp_dy_px);
+
+    // Motion accumulator: frame-to-frame block-luma diff feeds an
+    // exponentially-decaying buffer per cell. Skipped during one-shot
+    // screenshots (state is None) since temporal motion has no meaning there.
+    let motion = if let Some(state) = state {
+        let pre_luma_u8 = ((0.299 * avg_r as f32 + 0.587 * avg_g as f32 + 0.114 * avg_b as f32)
+            .clamp(0.0, 255.0)) as u8;
+        let idx = (r as usize) * (geometry.cols as usize) + (c as usize);
+        let diff = (pre_luma_u8 as f32 - state.prev_luma[idx] as f32).abs() / 255.0;
+        state.prev_luma[idx] = pre_luma_u8;
+        let new_motion = (state.motion[idx] * MOTION_DECAY + diff * MOTION_GAIN).clamp(0.0, 1.0);
+        state.motion[idx] = new_motion;
+        new_motion
+    } else {
+        0.0
+    };
+
     let ctx = StyleCtx {
         time,
         x: c,
@@ -549,6 +588,7 @@ fn sample_cell(
         edge_x,
         edge_y,
         edge,
+        motion,
     };
     let rgb = style::transform(cfg.style, (avg_r, avg_g, avg_b), &ctx);
     let luma = (0.299 * rgb.0 as f32 + 0.587 * rgb.1 as f32 + 0.114 * rgb.2 as f32) / 255.0;
