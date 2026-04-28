@@ -229,6 +229,17 @@ pub fn render(
         while c < cols {
             if let Some((mx0, mx1)) = row_mask {
                 if c == mx0 {
+                    // Decay the Lucy trail buffer under the masked rectangle so
+                    // those cells fade naturally while the menu is open. Without
+                    // this, masked cells keep their pre-menu trail values, and a
+                    // ghost rectangle pops back when the menu closes.
+                    if cfg.style == Style::Lucy {
+                        for skip_c in mx0..mx1 {
+                            let idx = (r as usize) * (cols as usize) + (skip_c as usize);
+                            state.trails[idx] =
+                                blend_rgb(state.trails[idx], (0, 0, 0), LUCY_TRAIL_DECAY);
+                        }
+                    }
                     let _ = write!(out, "\x1b[{}C", mx1 - mx0);
                     c = mx1;
                     continue;
