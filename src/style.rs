@@ -4,25 +4,28 @@
 //! calls it per cell per frame, so everything here needs to be cheap.
 //!
 //! - **Vivid** — saturation boost in HSV with a gentle gamma lift on value.
+//! - **Grayscale** — luma broadcast to all three channels. Looks like a
+//!   monochrome photo (full-depth gradations, unlike B&W's 5-stop ramp)
+//!   while still emitting ANSI color escapes so the renderer treats the
+//!   cell as a color cell rather than a no-color glyph.
 //! - **Sepia** — single affine RGB matrix.
 //! - **Van Gogh** — static palette snap. Source hue picks one of three
 //!   Van Gogh color ramps (cool / warm / green), source luma picks the
 //!   anchor within that ramp. No animation — the painting doesn't move.
 //! - **Monet** — pastelized HSV with a slow dappled-light mottle and
 //!   atmospheric warm/cool hue shift.
-//! - **Mushroom** — geometry-first style. Source colors pass through almost
+//! - **Alice** — geometry-first style. Source colors pass through almost
 //!   untouched; a Julia-set iteration field (edge-warped by the source
 //!   gradient) carves dark fractal bands into the image via value
 //!   modulation. The renderer also UV-warps the source sampling with a
 //!   domain-warped two-octave sine field, so straight edges curl into
 //!   moving fractal-layered curves.
-//! - **LSD** — fluid-dynamic overlay. A scalar flow field is built from two
+//! - **Lucy** — fluid-dynamic overlay. A scalar flow field is built from two
 //!   octaves of domain-warped sine noise; the warp evolves with time, and
 //!   the source-frame edge gradient pushes the flow *along* iso-lines (the
 //!   tangent perpendicular to the gradient), so the fluid swirls along
-//!   contours instead of straight across them. The flow value drives the
-//!   same hue/sat/value formulas the previous LSD used, so the palette is
-//!   unchanged.
+//!   contours instead of straight across them. The flow value drives full
+//!   hue rotation and value-by-flow modulation.
 //!
 //! `Color` and `BlackWhite` are passthrough — the only difference is
 //! whether the renderer emits ANSI color escapes at all.
@@ -32,22 +35,24 @@ pub enum Style {
     Color,
     Vivid,
     BlackWhite,
+    Grayscale,
     Sepia,
     VanGogh,
     Monet,
-    Mushroom,
-    Lsd,
+    Alice,
+    Lucy,
 }
 
-pub const ALL: [Style; 8] = [
+pub const ALL: [Style; 9] = [
     Style::Color,
     Style::Vivid,
     Style::BlackWhite,
+    Style::Grayscale,
     Style::Sepia,
     Style::VanGogh,
     Style::Monet,
-    Style::Mushroom,
-    Style::Lsd,
+    Style::Alice,
+    Style::Lucy,
 ];
 
 impl Style {
@@ -56,11 +61,12 @@ impl Style {
             Style::Color => "Color",
             Style::Vivid => "Vivid",
             Style::BlackWhite => "B&W",
+            Style::Grayscale => "Grayscale",
             Style::Sepia => "Sepia",
             Style::VanGogh => "Van Gogh",
             Style::Monet => "Monet",
-            Style::Mushroom => "Mushroom",
-            Style::Lsd => "LSD",
+            Style::Alice => "Alice",
+            Style::Lucy => "Lucy",
         }
     }
 
@@ -95,11 +101,12 @@ pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8
     match style {
         Style::Color | Style::BlackWhite => (r, g, b),
         Style::Vivid => vivid(r, g, b),
+        Style::Grayscale => grayscale(r, g, b),
         Style::Sepia => sepia(r, g, b),
         Style::VanGogh => van_gogh(r, g, b),
         Style::Monet => monet(r, g, b, ctx),
-        Style::Mushroom => mushroom(r, g, b, ctx),
-        Style::Lsd => lsd(r, g, b, ctx),
+        Style::Alice => alice(r, g, b, ctx),
+        Style::Lucy => lucy(r, g, b, ctx),
     }
 }
 
@@ -109,6 +116,14 @@ fn vivid(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     let s = (s * 1.55 + 0.04).clamp(0.0, 1.0);
     let v = v.powf(0.85);
     hsv_to_rgb(h, s, v)
+}
+
+// ─── Grayscale: luma broadcast across RGB ───────────────────────────────────
+fn grayscale(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let y = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    (y, y, y)
 }
 
 // ─── Sepia ──────────────────────────────────────────────────────────────────
@@ -198,8 +213,8 @@ fn monet(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     hsv_to_rgb(h, sat, val)
 }
 
-// ─── Mushroom: edge-warped Julia field carving the source image ─────────────
-fn mushroom(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
+// ─── Alice: edge-warped Julia field carving the source image ───────────────
+fn alice(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     let (h, s, v) = rgb_to_hsv(r, g, b);
     let cx = ctx.cols as f32 * 0.5;
     let cy = ctx.rows as f32 * 0.5;
@@ -235,11 +250,13 @@ fn mushroom(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     hsv_to_rgb(h_new, s, v_new)
 }
 
-// ─── LSD: edge-tangent fluid flow ───────────────────────────────────────────
-fn lsd(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
-    // Source saturation is discarded — LSD pins it near max.
+// ─── Lucy: edge-tangent fluid flow ──────────────────────────────────────────
+fn lucy(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
+    // Source saturation is discarded — Lucy pins it near max.
     let (h0, _, v0) = rgb_to_hsv(r, g, b);
-    let t = ctx.time;
+    // Global half-speed: scale time once at the top so the warp, sine
+    // octaves, drift, and hue rotation all slow together.
+    let t = ctx.time * 0.5;
 
     // Normalize cell coords to roughly screen-space units (~[-1.5, 1.5] in x).
     // Y is doubled to compensate for terminal cells being ~2:1 tall, so swirls
@@ -251,8 +268,7 @@ fn lsd(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
 
     // Curl-noise-ish domain warp: the warp at point p is built from sines of
     // p's *other* coordinate, which is the cheap trick that gives swirling,
-    // divergence-free-looking flow rather than a grid pattern. Time evolution
-    // is slow (≤0.4 rad/s) so the overall fluid breathes rather than strobes.
+    // divergence-free-looking flow rather than a grid pattern.
     let warp_x = ((py * 1.7 + t * 0.40).sin() + (py * 3.1 - t * 0.30).cos()) * 0.5;
     let warp_y = ((px * 1.7 - t * 0.35).sin() + (px * 3.1 + t * 0.32).cos()) * 0.5;
 
@@ -278,7 +294,7 @@ fn lsd(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
         + (xs * -0.04 + ys * 0.08 - t * 0.08).sin())
         * 0.5;
 
-    // Same palette mapping as the previous LSD: f * 540 sweeps the full hue
+    // Palette mapping: f * 540 sweeps the full hue
     // wheel along flow gradients, sat pinned near max, value gated by f so
     // dark/bright stripes carve through the field. Hue drift ~18°/s.
     let h = (h0 + t * 18.0 + f * 540.0 + drift * 50.0).rem_euclid(360.0);

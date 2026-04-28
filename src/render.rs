@@ -3,7 +3,7 @@
 //! Per-cell pipeline:
 //!   1. Average RGB over a source block.
 //!   2. Apply user brightness offset.
-//!   3. Apply style transform (Van Gogh, Mushroom, etc.).
+//!   3. Apply style transform (Van Gogh, Alice, etc.).
 //!   4. Recompute luma from the stylized RGB so the glyph matches the palette.
 //!   5. Contrast-shape luma → glyph via `ascii::luma_to_char`.
 //!   6. Emit fg escape (truecolor/256/ansi16 per `depth`) + glyph (unless style is B&W).
@@ -89,7 +89,7 @@ impl RenderConfig {
 }
 
 /// Per-frame state that survives between renders. Currently used only by
-/// LSD's afterimage feedback buffer — the live render loop owns one of these
+/// Lucy's afterimage feedback buffer — the live render loop owns one of these
 /// and passes a mutable reference into `render`. Reset whenever the terminal
 /// resizes or the active style changes, so trails never leak across modes.
 pub struct RenderState {
@@ -133,11 +133,11 @@ impl Default for RenderState {
 /// tweak here if your terminal renders tall (more like 2.2) or square (1.6).
 const CHAR_ASPECT: f32 = 2.0;
 
-/// LSD afterimage retention. 0.85 means each frame keeps 85% of the previous
+/// Lucy afterimage retention. 0.85 means each frame keeps 85% of the previous
 /// cell color and adds 15% of the fresh value — half-life ≈ 4.3 frames at
 /// 30 FPS (~140 ms). Static scenes converge to the steady-state color so they
 /// stay sharp; motion smears across the decay window.
-const LSD_TRAIL_DECAY: f32 = 0.85;
+const LUCY_TRAIL_DECAY: f32 = 0.85;
 const SCREENSHOT_CELL_WIDTH: usize = 8;
 const SCREENSHOT_CELL_HEIGHT: usize = 16;
 const SCREENSHOT_FONT_SCALE: f32 = 15.0;
@@ -241,12 +241,17 @@ pub fn render(
                 continue;
             };
 
-            if cfg.style == Style::Lsd {
-                apply_lsd_trail(&mut cell, state, cols, c, r, cfg);
+            if cfg.style == Style::Lucy {
+                apply_lucy_trail(&mut cell, state, cols, c, r, cfg);
             }
 
             if cell.emit_color {
-                let fg = color::quantize(depth, cell.rgb.0, cell.rgb.1, cell.rgb.2);
+                let (er, eg, eb) = if cfg.mode == RenderMode::Ascii {
+                    ascii_brightness_compensation(cell.rgb)
+                } else {
+                    cell.rgb
+                };
+                let fg = color::quantize(depth, er, eg, eb);
                 if last_fg != Some(fg) {
                     fg.write(out);
                     last_fg = Some(fg);
@@ -463,18 +468,18 @@ fn sample_cell(
     cfg: &RenderConfig,
     time: f32,
 ) -> Option<RenderedCell> {
-    let (warp_dx_px, warp_dy_px) = if cfg.style == Style::Mushroom {
-        mushroom_warp_pixels(geometry, c, r, time, cfg.mirror)
+    let (warp_dx_px, warp_dy_px) = if cfg.style == Style::Alice {
+        alice_warp_pixels(geometry, c, r, time, cfg.mirror)
     } else {
         (0.0, 0.0)
     };
 
     let cx = if cfg.mirror { geometry.cols - 1 - c } else { c };
 
-    // Mushroom samples each channel at a different offset for radial
+    // Alice samples each channel at a different offset for radial
     // chromatic aberration; everything else uses one shared block average.
-    let (raw_r, raw_g, raw_b) = if cfg.style == Style::Mushroom {
-        let (ca_dx, ca_dy) = mushroom_ca_offset_pixels(geometry, c, r, time, cfg.mirror);
+    let (raw_r, raw_g, raw_b) = if cfg.style == Style::Alice {
+        let (ca_dx, ca_dy) = alice_ca_offset_pixels(geometry, c, r, time, cfg.mirror);
         let r_avg =
             sample_channel_avg(frame, geometry, cx, r, warp_dx_px + ca_dx, warp_dy_px + ca_dy, 0);
         let g_avg = sample_channel_avg(frame, geometry, cx, r, warp_dx_px, warp_dy_px, 1);
@@ -552,7 +557,7 @@ fn sample_cell(
     })
 }
 
-/// Mushroom radial chromatic aberration: per-channel sampling offset that
+/// Alice radial chromatic aberration: per-channel sampling offset that
 /// grows from the screen center outward, sub-linear in radius so even
 /// mid-frame cells get a clear fringe. R is sampled along +radial, B along
 /// -radial, G unshifted — classic lens-CA polarity.
@@ -560,7 +565,7 @@ fn sample_cell(
 /// Magnitude breathes: a ~7 s sine cycles the corner peak between
 /// ~0.8 cells (mild fringe) and ~8.3 cells (heavy splay). The motion is
 /// what the user perceives as the image "breathing" in and out of focus.
-fn mushroom_ca_offset_pixels(
+fn alice_ca_offset_pixels(
     geometry: &RenderGeometry,
     c: u16,
     r: u16,
@@ -641,7 +646,7 @@ fn sample_channel_avg(
     }
 }
 
-/// Mushroom UV warp: shift each cell's source-frame sampling position by a
+/// Alice UV warp: shift each cell's source-frame sampling position by a
 /// domain-warped two-octave sine field. The first octave is a coarse, slow
 /// sine pair (dx depends on display-y, dy on display-x — so vertical edges
 /// curl horizontally and horizontal edges wave vertically as the cursor
@@ -650,7 +655,7 @@ fn sample_channel_avg(
 /// (Inigo-Quilez-style) noise on the cheap. Net amplitude ~3.7 cells so the
 /// distortion is clearly visible while still preserving image content.
 /// We flip dx under mirror so the curl direction matches what's drawn.
-fn mushroom_warp_pixels(
+fn alice_warp_pixels(
     geometry: &RenderGeometry,
     c: u16,
     r: u16,
@@ -687,11 +692,11 @@ fn mushroom_warp_pixels(
     (dx_px, dy_px)
 }
 
-/// LSD afterimage: alpha-blend the freshly computed cell color against the
+/// Lucy afterimage: alpha-blend the freshly computed cell color against the
 /// trail buffer, write the blend back into both the cell and the buffer, and
 /// recompute the glyph from the blended luma so ASCII shading also fades
 /// with the trail.
-fn apply_lsd_trail(
+fn apply_lucy_trail(
     cell: &mut RenderedCell,
     state: &mut RenderState,
     cols: u16,
@@ -701,7 +706,7 @@ fn apply_lsd_trail(
 ) {
     let idx = (r as usize) * (cols as usize) + (c as usize);
     let prev = state.trails[idx];
-    let blended = blend_rgb(prev, cell.rgb, LSD_TRAIL_DECAY);
+    let blended = blend_rgb(prev, cell.rgb, LUCY_TRAIL_DECAY);
     state.trails[idx] = blended;
     cell.rgb = blended;
 
@@ -713,6 +718,20 @@ fn apply_lsd_trail(
         RenderMode::Ascii => ascii::luma_to_char(luma, cfg.contrast, true),
         RenderMode::Blocks => '█',
     };
+}
+
+/// ASCII-mode color boost. ASCII glyphs only paint a fraction of each cell;
+/// the rest shows terminal background, so a faithful color reads much darker
+/// than the equivalent solid block. Multiply each channel by a luma-driven
+/// factor (1.0 at white, ~1.85 at black) so dark/sparse cells emit a
+/// strongly lifted painted stroke while bright cells barely change. Hue and
+/// saturation are preserved because the multiplier is the same per channel.
+fn ascii_brightness_compensation(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    let (r, g, b) = rgb;
+    let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
+    let boost = 1.0 + (1.0 - luma).max(0.0) * 0.85;
+    let lift = |c: u8| ((c as f32 * boost).min(255.0)) as u8;
+    (lift(r), lift(g), lift(b))
 }
 
 fn blend_rgb(prev: (u8, u8, u8), new: (u8, u8, u8), decay: f32) -> (u8, u8, u8) {
