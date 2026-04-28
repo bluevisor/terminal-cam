@@ -20,24 +20,31 @@ pub const RAMP: [char; 95] = [
 /// rescale the B&W k=5 sigmoid would map deep black to `:` (idx 7), leaving
 /// a faint speckle in shadows — rescaling pins black to actual space.
 /// Color mode uses a steep curve (k=12); B&W uses a softer curve (k=5) so
-/// the middle of the ramp has room for midtone gradations.
+/// the middle of the ramp has room for midtone gradations, plus a gamma 1.5
+/// pre-shape that pushes midtones toward darker glyphs (a flat sigmoid put
+/// luma=0.5 on ramp[47]=`T`, which read as much brighter than a real Zone V
+/// midtone would on a B&W photo).
 pub fn luma_to_char(luma: f32, contrast: f32, color: bool) -> char {
     let boosted = ((luma - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+    let toned = if color { boosted } else { boosted.powf(1.5) };
     let k = if color { 12.0 } else { 5.0 };
-    let shaped = 1.0 / (1.0 + (-k * (boosted - 0.5)).exp());
-    let lo = 1.0 / (1.0 + (k * 0.5).exp()); // sigmoid at boosted=0
-    let hi = 1.0 / (1.0 + (-k * 0.5).exp()); // sigmoid at boosted=1
+    let shaped = 1.0 / (1.0 + (-k * (toned - 0.5)).exp());
+    let lo = 1.0 / (1.0 + (k * 0.5).exp()); // sigmoid at toned=0
+    let hi = 1.0 / (1.0 + (-k * 0.5).exp()); // sigmoid at toned=1
     let normalized = ((shaped - lo) / (hi - lo)).clamp(0.0, 1.0);
     let idx = (normalized * (RAMP.len() - 1) as f32).round() as usize;
     RAMP[idx]
 }
 
 /// 5-stop Unicode shading ramp. Used for B&W + Blocks mode where there's
-/// no color channel to carry brightness, so the glyph itself must.
+/// no color channel to carry brightness, so the glyph itself must. Same
+/// gamma 1.5 tone curve as `luma_to_char` so a midtone luma shifts from
+/// `▒` down to `░`, matching the perceived brightness of a B&W photo.
 pub fn luma_to_shade(luma: f32, contrast: f32) -> char {
     const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
     let boosted = ((luma - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
-    let idx = (boosted * (SHADES.len() - 1) as f32).round() as usize;
+    let toned = boosted.powf(1.5);
+    let idx = (toned * (SHADES.len() - 1) as f32).round() as usize;
     SHADES[idx]
 }
 

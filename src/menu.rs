@@ -40,12 +40,14 @@ const ITEMS: [&str; 10] = [
     "Quit (q)",
 ];
 
-// 2-row half-block title. Each letter is 1–5 cells wide × 2 rows tall.
-// Unicode half-block chars (▀ top, ▄ bottom, █ full) stack vertically to
-// form letterforms at 2×1 pixels-per-cell-row resolution.
-const TITLE_LINE_1: &str = "▀█▀ █▀▀ █▀▄ █▄▀▄█ █ █▄ █ ▄▀█ █   ▄▄▄ ▄▀▀ ▄▀█ █▄▀▄█";
-const TITLE_LINE_2: &str = " █  █▄▄ █▀▄ █ ▀ █ █ █ ▀█ █▀█ █▄▄ ▀▀▀ ▀▄▄ █▀█ █ ▀ █";
-const TITLE_COLS: u16 = 50;
+// 3-row half-block title. Each letter is 1–5 cells wide × 3 rows tall, so
+// 6 pixel rows of resolution — enough for E's middle bar (2-row layout
+// only had 4 pixel rows, which collapsed E to look identical to C).
+// Unicode half-block chars (▀ top, ▄ bottom, █ full) stack vertically.
+const TITLE_LINE_1: &str = "▀█▀ █▀▀ █▀▄ █▄▀▄█ █ █▄ █ ▄▀█ █     ▄▀▀ ▄▀█ █▄▀▄█";
+const TITLE_LINE_2: &str = " █  █▀▀ █▀▄ █ ▀ █ █ █ ▀█ █▀█ █     █   █▀█ █ ▀ █";
+const TITLE_LINE_3: &str = " █  █▄▄ ▀▄▄ █   █ █ █  █ █ █ █▄▄ ▀▄▄ █ █ █   █";
+const TITLE_COLS: u16 = 48;
 
 impl MenuState {
     pub fn new(cameras: Vec<CameraInfo>, current_camera: u32, screenshot_dir: PathBuf) -> Self {
@@ -156,10 +158,20 @@ impl MenuState {
     }
 }
 
-/// Appends the options overlay to `buf`. Caller flushes — drawing into
-/// the same buffer as the frame avoids the camera-flash-behind-menu
-/// flicker you get from two separate stdout writes.
-pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &mut String) {
+/// 0-indexed bounding box `(x0, y0, w, h)` of the centred overlay. Used by
+/// the renderer to skip writing camera cells underneath the menu — without
+/// that mask, terminals that don't support DEC 2026 synchronized updates
+/// repaint the camera content before the menu overdraws each frame, which
+/// the user sees as flicker. Width/height are clipped to the visible grid
+/// so the mask never extends past `cols`/`rows`.
+pub fn bounds(state: &MenuState, cols: u16, rows: u16) -> (u16, u16, u16, u16) {
+    let (x0, y0, width, height, _, _) = layout(state, cols, rows);
+    let visible_w = width.min(cols.saturating_sub(x0));
+    let visible_h = height.min(rows.saturating_sub(y0));
+    (x0, y0, visible_w, visible_h)
+}
+
+fn layout(state: &MenuState, cols: u16, rows: u16) -> (u16, u16, u16, u16, &'static str, String) {
     let hint = if state.path_editor.is_some() {
         "type path · Enter save · Esc cancel · Backspace delete"
     } else {
@@ -173,11 +185,21 @@ pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &m
         .max(TITLE_COLS + 6)
         .max(footer_cols + 6)
         .max(64);
-    // Layout: top (1) + title (2) + blank (1) + items (N) + blank (1)
-    //         + hint (1) + footer (1) + bottom (1) = N + 8.
-    let height: u16 = (ITEMS.len() as u16) + 8;
+    // Layout: top (1) + title (3) + blank (1) + items (N) + blank (1)
+    //         + hint (1) + footer (1) + bottom (1) = N + 9.
+    let height: u16 = (ITEMS.len() as u16) + 9;
     let x0 = cols.saturating_sub(width) / 2;
     let y0 = rows.saturating_sub(height) / 2;
+    (x0, y0, width, height, hint, footer)
+}
+
+/// Appends the options overlay to `buf`. Caller flushes — drawing into
+/// the same buffer as the frame avoids the camera-flash-behind-menu
+/// flicker you get from two separate stdout writes.
+pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &mut String) {
+    let (x0, y0, width, height, hint, footer) = layout(state, cols, rows);
+    let hint_cols = hint.chars().count() as u16;
+    let footer_cols = footer.chars().count() as u16;
 
     buf.push_str("\x1b[0m");
 
@@ -206,26 +228,22 @@ pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &m
         "─".repeat(width as usize - 2)
     );
 
-    // Title — 2-row half-block ASCII art, centered.
+    // Title — 3-row half-block ASCII art, centered.
     let tx = x0 + (width - TITLE_COLS) / 2;
-    let _ = write!(
-        buf,
-        "\x1b[{};{}H\x1b[1m{}\x1b[0m",
-        y0 + 2,
-        tx + 1,
-        TITLE_LINE_1
-    );
-    let _ = write!(
-        buf,
-        "\x1b[{};{}H\x1b[1m{}\x1b[0m",
-        y0 + 3,
-        tx + 1,
-        TITLE_LINE_2
-    );
+    for (offset, line) in [TITLE_LINE_1, TITLE_LINE_2, TITLE_LINE_3].iter().enumerate() {
+        let _ = write!(
+            buf,
+            "\x1b[{};{}H\x1b[1m{}\x1b[0m",
+            y0 + 2 + offset as u16,
+            tx + 1,
+            line
+        );
+    }
 
-    // Items. Shifted down by 1 row compared to the single-row title layout.
+    // Items start one row further down than the 2-row layout to clear the
+    // taller title.
     for (i, item) in ITEMS.iter().enumerate() {
-        let y = y0 + 5 + i as u16;
+        let y = y0 + 6 + i as u16;
         let value = match i {
             0 => state
                 .cameras

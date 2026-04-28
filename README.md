@@ -4,7 +4,7 @@ Live webcam → ASCII art in your terminal. 95-char density ramp, truecolor
 output, painterly color styles, optional solid-block rendering, and a few
 fractal-driven psychedelic modes.
 
-![styles](https://img.shields.io/badge/styles-8-blue) ![render](https://img.shields.io/badge/render-ASCII%20%7C%20Blocks-green) ![rust](https://img.shields.io/badge/rust-2021-orange) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![styles](https://img.shields.io/badge/styles-9-blue) ![render](https://img.shields.io/badge/render-ASCII%20%7C%20Blocks-green) ![rust](https://img.shields.io/badge/rust-2021-orange) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## Install
 
@@ -60,16 +60,22 @@ terminal application (System Settings → Privacy & Security → Camera).
 ## Options
 
 - **Camera source** — cycle detected cameras
-- **Style** — `Color`, `Vivid`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Mushroom`, `LSD`
+- **Style** — `Color`, `Vivid`, `B&W`, `Grayscale`, `Sepia`, `Van Gogh`, `Monet`, `Alice`, `Lucy`
   - `Van Gogh` — static palette snap. Source hue picks one of three ramps
     (cool / warm / green), source luma picks the anchor within it.
     Hand-curated from Starry Night, Irises, and the self-portrait.
   - `Monet` — pastelized HSV with a slow dappled-light mottle and
     atmospheric warm/cool shift.
-  - `Mushroom` — radial mandala (concentric rings + 6-fold angular petals)
-    plus a slow-drifting Julia-set iteration field.
-  - `LSD` — Julia-set iteration count drives hue rotation; the c-parameter
-    drifts slowly so the fractal morphs through related shapes.
+  - `Alice` — geometry-first. Source colors pass through near-untouched;
+    a Julia-set iteration field carves dark fractal ribbons along image
+    edges, the source is UV-warped by a domain-warped two-octave sine
+    field, and a slow breathing radial chromatic aberration splays RGB
+    fringes from the corners inward.
+  - `Lucy` — fluid-dynamic overlay. A scalar flow field built from
+    domain-warped sine noise streams along edge tangents (perpendicular
+    to the luma gradient) so swirls trace contours rather than crossing
+    them; an afterimage feedback buffer leaves fading rainbow trails
+    behind motion.
 - **Render mode** — `ASCII` (density-ramp glyphs) or `Blocks` (solid `█`
   in color styles so the color escape alone carries the image; `░▒▓█`
   shading ramp in B&W).
@@ -80,7 +86,7 @@ terminal application (System Settings → Privacy & Security → Camera).
 - **Brightness** — `-1.00` to `+1.00`, added to each RGB channel pre-style.
 - **Contrast** — `0.1` to `3.0`. Applied to RGB upstream (not just to glyph
   density) so it affects the emitted color, Van Gogh palette-band
-  selection, and Mushroom / LSD HSV value.
+  selection, and Alice / Lucy HSV value.
 - **Screenshot path** — directory used when pressing `Space`. Press `Enter`
   or `→` on the row, type a path, then press `Enter` to save it to the app
   config. `~` is expanded to your home directory.
@@ -107,7 +113,7 @@ Per terminal cell, every frame:
 1. Average RGB over the source block.
 2. Add brightness offset, apply contrast stretch around mid-gray (128).
 3. Run the style transform. Palette / fractal styles produce new RGB from
-   source luma + hue (Van Gogh), HSV rotation (Monet / Mushroom / LSD),
+   source luma + hue (Van Gogh), HSV rotation (Monet / Alice / Lucy),
    or an affine matrix (Sepia).
 4. Recompute luminance from the stylized RGB.
 5. Pick a glyph:
@@ -133,8 +139,8 @@ don't squash or stretch as you resize the window.
 - `src/render.rs` — per-cell render pipeline, config, synchronized output
 - `src/screenshot.rs` — screenshot capture + dependency-free PNG writing
 - `src/config.rs` — screenshot path config load/save
-- `src/style.rs` — style transforms (Sepia / Van Gogh / Monet / Mushroom /
-  LSD) and the Julia-set iteration helper
+- `src/style.rs` — style transforms (Sepia / Van Gogh / Monet / Alice /
+  Lucy) and the Julia-set iteration helper
 - `src/color.rs` — depth detection + truecolor / 256 / ANSI-16 quantization
 - `src/ascii.rs` — 95-char density ramp and 5-stop shading ramp
 - `src/menu.rs` — centered options overlay (half-block title, version
@@ -151,8 +157,8 @@ Van Gogh's three palette ramps live at the top of `src/style.rs` as
 `VG_COOL` / `VG_WARM` / `VG_GREEN`. Each is a 5-anchor ramp (dark →
 light); swap in your own anchors for a different painter.
 
-Mushroom and LSD's Julia `c` parameter drifts on a small loop — tune
-speed, amplitude, and center in `mushroom()` / `lsd()` in `src/style.rs`
+Alice and Lucy's Julia `c` parameter drifts on a small loop — tune
+speed, amplitude, and center in `alice()` / `lucy()` in `src/style.rs`
 to explore different regions of the fractal parameter space.
 
 ## Stack
