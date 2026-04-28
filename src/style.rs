@@ -10,12 +10,19 @@
 //!   anchor within that ramp. No animation — the painting doesn't move.
 //! - **Monet** — pastelized HSV with a slow dappled-light mottle and
 //!   atmospheric warm/cool hue shift.
-//! - **Mushroom** — radial mandala (concentric rings + angular petals)
-//!   plus a Julia-set iteration field whose sampling coordinates are
-//!   domain-warped by source luma, so the fractal bends around objects.
-//! - **LSD** — Julia-set iteration count drives hue rotation; both the
-//!   sampling coordinates *and* the c-parameter are modulated by source
-//!   luma, so different parts of the video render different fractal shapes.
+//! - **Mushroom** — geometry-first style. Source colors pass through almost
+//!   untouched; a Julia-set iteration field (edge-warped by the source
+//!   gradient) carves dark fractal bands into the image via value
+//!   modulation. The renderer also UV-warps the source sampling with a
+//!   domain-warped two-octave sine field, so straight edges curl into
+//!   moving fractal-layered curves.
+//! - **LSD** — fluid-dynamic overlay. A scalar flow field is built from two
+//!   octaves of domain-warped sine noise; the warp evolves with time, and
+//!   the source-frame edge gradient pushes the flow *along* iso-lines (the
+//!   tangent perpendicular to the gradient), so the fluid swirls along
+//!   contours instead of straight across them. The flow value drives the
+//!   same hue/sat/value formulas the previous LSD used, so the palette is
+//!   unchanged.
 //!
 //! `Color` and `BlackWhite` are passthrough — the only difference is
 //! whether the renderer emits ANSI color escapes at all.
@@ -74,6 +81,13 @@ pub struct StyleCtx {
     pub y: u16,
     pub cols: u16,
     pub rows: u16,
+    /// Source-frame luma gradient at this cell, X component, ~[-1, 1].
+    /// Sign points from dark to bright across the edge.
+    pub edge_x: f32,
+    /// Source-frame luma gradient at this cell, Y component, ~[-1, 1].
+    pub edge_y: f32,
+    /// Edge magnitude `sqrt(edge_x² + edge_y²)`, clamped to [0, 1].
+    pub edge: f32,
 }
 
 pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8) {
@@ -184,74 +198,92 @@ fn monet(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     hsv_to_rgb(h, sat, val)
 }
 
-// ─── Mushroom: mandala + slow-drifting Julia-set overlay ────────────────────
+// ─── Mushroom: edge-warped Julia field carving the source image ─────────────
 fn mushroom(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
-    let (mut h, mut s, mut v) = rgb_to_hsv(r, g, b);
+    let (h, s, v) = rgb_to_hsv(r, g, b);
     let cx = ctx.cols as f32 * 0.5;
     let cy = ctx.rows as f32 * 0.5;
-    // Terminal cells are ~2:1 tall; pre-stretch y so rings look round.
-    let dx = ctx.x as f32 - cx;
-    let dy = (ctx.y as f32 - cy) * 2.0;
-    let radius = (dx * dx + dy * dy).sqrt();
-    let angle = dy.atan2(dx);
     let t = ctx.time;
 
-    // Mandala: slowed by ~3× from the previous version.
-    let ring = ((radius * 0.3 - t * 0.85).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-    let petals = ((angle * 6.0 + t * 0.28).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-
-    // Julia-set iteration field with image-driven domain warp: bright source
-    // pixels displace the Julia sampling toward +x/+y, dark pixels toward
-    // -x/-y, so the fractal's iso-lines curl around objects (face, edges)
-    // instead of being locked to screen coordinates. c drifts slowly so the
-    // underlying fractal still morphs.
-    let luma_warp = luma(r, g, b) - 0.5; // -0.5..0.5
-    let jx = (ctx.x as f32 - cx) / cx * 1.3 + luma_warp * 0.45;
-    let jy = (ctx.y as f32 - cy) / cy * 0.65 + luma_warp * 0.25;
+    // Julia-set iteration field, sampled in screen-normalized coords with
+    // a strong edge-driven domain warp: the source-frame luma gradient
+    // pushes sampling far enough along its direction (×1.6 / ×0.95) that
+    // the Julia iso-contours physically bend to align with image edges.
+    // c drifts so the fractal still morphs over time.
+    let jx = (ctx.x as f32 - cx) / cx * 1.3 + ctx.edge_x * 1.6;
+    let jy = (ctx.y as f32 - cy) / cy * 0.65 + ctx.edge_y * 0.95;
     let jcx = -0.40 + (t * 0.07).sin() * 0.15;
     let jcy = 0.60 + (t * 0.05).cos() * 0.15;
-    let jc = julia_escape(jx, jy, jcx, jcy);
+    let jc = julia_escape(jx, jy, jcx, jcy); // 0 = escaped fast, 1 = inside set
 
-    h = (h + 30.0 + ring * 90.0 + petals * 55.0 + jc * 140.0 + t * 8.0).rem_euclid(360.0);
-    s = (s + 0.20 + 0.22 * ring + 0.10 * jc).clamp(0.0, 1.0);
-    v = (v * (0.68 + 0.32 * (ring * 0.4 + petals * 0.25 + jc * 0.35))).clamp(0.0, 1.0);
+    // Boundary band: 4·jc·(1−jc) peaks at jc=0.5 (the escape transition) and
+    // tapers to 0 both inside and outside the set. Using it as the modulator
+    // makes the fractal show as a thin dark/tinted ribbon along the
+    // Julia boundary instead of a solid blob.
+    let band = 4.0 * jc * (1.0 - jc);
 
-    hsv_to_rgb(h, s, v)
+    // Edge gate: the fractal pattern is only painted where the source has a
+    // real edge. In flat regions (skin, walls) the gate is near zero so no
+    // fractal carving appears; at moderate-to-strong contours (face outline,
+    // hair, glasses) the gate saturates at 1, so the band rides those edges.
+    // Combined with the edge-warped jx/jy above, this is what makes the
+    // fractal *follow* edges instead of sitting in screen space.
+    let edge_gate = (ctx.edge * 2.8).clamp(0.0, 1.0);
+    let h_new = (h + band * 32.0 * edge_gate).rem_euclid(360.0);
+    let v_new = (v * (1.0 - band * 0.6 * edge_gate)).clamp(0.0, 1.0);
+
+    hsv_to_rgb(h_new, s, v_new)
 }
 
-// ─── LSD: Julia-set-driven hue storm ────────────────────────────────────────
+// ─── LSD: edge-tangent fluid flow ───────────────────────────────────────────
 fn lsd(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     // Source saturation is discarded — LSD pins it near max.
     let (h0, _, v0) = rgb_to_hsv(r, g, b);
-    let cx = ctx.cols as f32 * 0.5;
-    let cy = ctx.rows as f32 * 0.5;
     let t = ctx.time;
 
-    // Julia iteration count field with image-driven domain warp + small c
-    // modulation. Domain warp bends Julia coordinates by source luma so
-    // iso-lines curl around objects. c modulation means bright/dark regions
-    // render slightly different Julia shapes — the fractal "is" the object
-    // rather than sitting on top of it. Time drift keeps the overall shape
-    // morphing through the Mandelbrot edge region.
-    let luma_warp = luma(r, g, b) - 0.5;
-    let jx = (ctx.x as f32 - cx) / cx * 1.5 + luma_warp * 0.5;
-    let jy = (ctx.y as f32 - cy) / cy * 0.75 + luma_warp * 0.3;
-    let jcx = -0.70 + (t * 0.06).sin() * 0.26 + luma_warp * 0.12;
-    let jcy = 0.27 + (t * 0.045).cos() * 0.26 + luma_warp * 0.08;
-    let jc = julia_escape(jx, jy, jcx, jcy);
+    // Normalize cell coords to roughly screen-space units (~[-1.5, 1.5] in x).
+    // Y is doubled to compensate for terminal cells being ~2:1 tall, so swirls
+    // look round rather than vertically squashed.
+    let cx = ctx.cols as f32 * 0.5;
+    let cy = ctx.rows as f32 * 0.5;
+    let mut px = (ctx.x as f32 - cx) / cx * 1.5;
+    let mut py = (ctx.y as f32 - cy) / cy * 0.75 * 2.0;
 
-    // Gentle secondary drift adds soft color motion inside the set.
-    let (x, y) = (ctx.x as f32, ctx.y as f32);
-    let drift = ((x * 0.07 + y * 0.05 + t * 0.10).sin()
-        + (x * -0.04 + y * 0.08 - t * 0.08).sin())
+    // Curl-noise-ish domain warp: the warp at point p is built from sines of
+    // p's *other* coordinate, which is the cheap trick that gives swirling,
+    // divergence-free-looking flow rather than a grid pattern. Time evolution
+    // is slow (≤0.4 rad/s) so the overall fluid breathes rather than strobes.
+    let warp_x = ((py * 1.7 + t * 0.40).sin() + (py * 3.1 - t * 0.30).cos()) * 0.5;
+    let warp_y = ((px * 1.7 - t * 0.35).sin() + (px * 3.1 + t * 0.32).cos()) * 0.5;
+
+    // Edge tangent — perpendicular to the luma gradient — pushes the fluid
+    // *along* iso-lines, so swirls stream around contours instead of crossing
+    // them. (gx, gy) ⟂ (gy, -gx).
+    let tangent_x = ctx.edge_y;
+    let tangent_y = -ctx.edge_x;
+    px += warp_x * 0.55 + tangent_x * 1.10;
+    py += warp_y * 0.55 + tangent_y * 1.10;
+
+    // Two octaves of warped sine noise, recombined as a unit-range scalar.
+    // Octave weights (0.62 / 0.38) tilt toward the low frequency so the fluid
+    // reads as smooth rivers with finer ripple, not white noise.
+    let f1 = (px * 2.3 + t * 0.50).sin() * (py * 1.9 - t * 0.40).cos();
+    let f2 = (px * 4.1 - t * 0.60).sin() * (py * 3.7 + t * 0.55).cos();
+    let f = ((f1 * 0.62 + f2 * 0.38) * 0.5 + 0.5).clamp(0.0, 1.0);
+
+    // Secondary drift in screen space adds soft, low-frequency color motion
+    // that's independent of the warped fluid coords — same role as before.
+    let (xs, ys) = (ctx.x as f32, ctx.y as f32);
+    let drift = ((xs * 0.07 + ys * 0.05 + t * 0.10).sin()
+        + (xs * -0.04 + ys * 0.08 - t * 0.08).sin())
         * 0.5;
 
-    // jc*540 → the fractal boundary shows as visible hue bands (crossing the
-    // escape-count gradient sweeps through the whole hue wheel). Hue drift is
-    // slow (~18°/s) so the overall palette breathes instead of strobing.
-    let h = (h0 + t * 18.0 + jc * 540.0 + drift * 50.0).rem_euclid(360.0);
+    // Same palette mapping as the previous LSD: f * 540 sweeps the full hue
+    // wheel along flow gradients, sat pinned near max, value gated by f so
+    // dark/bright stripes carve through the field. Hue drift ~18°/s.
+    let h = (h0 + t * 18.0 + f * 540.0 + drift * 50.0).rem_euclid(360.0);
     let s = (0.88 + drift * 0.10).clamp(0.0, 1.0);
-    let v = (v0 * (0.5 + 0.5 * jc) + 0.05).clamp(0.0, 1.0);
+    let v = (v0 * (0.5 + 0.5 * f) + 0.05).clamp(0.0, 1.0);
 
     hsv_to_rgb(h, s, v)
 }
@@ -329,7 +361,16 @@ mod tests {
     use super::*;
 
     fn ctx() -> StyleCtx {
-        StyleCtx { time: 1.25, x: 12, y: 7, cols: 80, rows: 24 }
+        StyleCtx {
+            time: 1.25,
+            x: 12,
+            y: 7,
+            cols: 80,
+            rows: 24,
+            edge_x: 0.4,
+            edge_y: -0.3,
+            edge: 0.5,
+        }
     }
 
     #[test]

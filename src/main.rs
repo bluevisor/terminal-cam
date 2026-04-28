@@ -113,6 +113,7 @@ fn run(
 ) -> Result<()> {
     let frame_budget = Duration::from_micros(1_000_000 / TARGET_FPS as u64);
     let mut scratch = String::with_capacity(1 << 18);
+    let mut render_state = render::RenderState::new();
     let start = Instant::now();
     let mut status: Option<StatusMessage> = None;
 
@@ -234,7 +235,7 @@ fn run(
 
         let frame_opt = capture.frame.lock().clone();
         if let Some(frame) = frame_opt {
-            render::render(&frame, cols, rows, cfg, time, &mut scratch);
+            render::render(&frame, cols, rows, cfg, time, &mut render_state, &mut scratch);
             if *in_menu {
                 menu::draw(menu_state, cfg, cols, rows, &mut scratch);
             }
