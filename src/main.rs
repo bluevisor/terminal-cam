@@ -18,7 +18,7 @@ use crossterm::{
     },
 };
 use std::fmt::Write as FmtWrite;
-use std::io::{stdout, Write as IoWrite};
+use std::io::{stdin, stdout, BufRead, Write as IoWrite};
 use std::time::{Duration, Instant};
 
 const TARGET_FPS: u32 = 30;
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         return Err(anyhow!("no cameras found"));
     }
 
-    let mut current_camera = cameras[0].index;
+    let mut current_camera = pick_camera(&cameras)?;
     let mut capture = camera::spawn_capture(current_camera)?;
     let mut cfg = render::RenderConfig {
         detected: color::detect(),
@@ -69,6 +69,38 @@ fn main() -> Result<()> {
     disable_raw_mode()?;
 
     result
+}
+
+fn pick_camera(cameras: &[camera::CameraInfo]) -> Result<u32> {
+    if cameras.len() == 1 {
+        return Ok(cameras[0].index);
+    }
+
+    let mut out = stdout().lock();
+    writeln!(out, "Multiple cameras detected:")?;
+    for (i, cam) in cameras.iter().enumerate() {
+        writeln!(out, "  [{}] {}", i + 1, cam.name)?;
+    }
+    write!(out, "Select camera [1-{}, default 1]: ", cameras.len())?;
+    out.flush()?;
+    drop(out);
+
+    let mut line = String::new();
+    stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(cameras[0].index);
+    }
+    let choice: usize = trimmed
+        .parse()
+        .map_err(|_| anyhow!("invalid selection: {trimmed}"))?;
+    if choice < 1 || choice > cameras.len() {
+        return Err(anyhow!(
+            "selection {choice} out of range 1..={}",
+            cameras.len()
+        ));
+    }
+    Ok(cameras[choice - 1].index)
 }
 
 fn run(
