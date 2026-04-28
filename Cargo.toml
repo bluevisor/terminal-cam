@@ -1,6 +1,6 @@
 [package]
 name = "terminal-cam"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "ASCII-art webcam viewer for your terminal"
 license = "MIT"
