@@ -18,7 +18,7 @@ use crate::{
     style::{self, Style, StyleCtx},
 };
 use ab_glyph::{point, Font, FontArc, ScaleFont};
-use std::{fs, io::Write, sync::OnceLock};
+use std::{fmt::Write as FmtWrite, fs, io::Write, sync::OnceLock};
 
 /// How each cell's glyph is chosen.
 ///
@@ -200,6 +200,7 @@ pub fn render(
     cfg: &RenderConfig,
     time: f32,
     state: &mut RenderState,
+    mask: Option<(u16, u16, u16, u16)>,
     out: &mut String,
 ) {
     out.clear();
@@ -216,9 +217,27 @@ pub fn render(
     let mut last_fg: Option<Fg> = None;
 
     for r in 0..rows {
-        for c in 0..cols {
+        // Skip camera cells under the menu — terminals without DEC 2026
+        // sync would otherwise paint camera content first then overdraw
+        // with the menu, which the user sees as flicker.
+        let row_mask = mask.and_then(|(mx, my, mw, mh)| {
+            (r >= my && r < my.saturating_add(mh))
+                .then(|| (mx, mx.saturating_add(mw).min(cols)))
+        });
+
+        let mut c: u16 = 0;
+        while c < cols {
+            if let Some((mx0, mx1)) = row_mask {
+                if c == mx0 {
+                    let _ = write!(out, "\x1b[{}C", mx1 - mx0);
+                    c = mx1;
+                    continue;
+                }
+            }
+
             let Some(mut cell) = sample_cell(frame, &geometry, c, r, cfg, time) else {
                 out.push(' ');
+                c += 1;
                 continue;
             };
 
@@ -234,6 +253,7 @@ pub fn render(
                 }
             }
             out.push(cell.ch);
+            c += 1;
         }
 
         out.push_str("\x1b[0m");

@@ -152,7 +152,6 @@ fn run(
                             menu::Action::None => {}
                             menu::Action::Close => {
                                 *in_menu = false;
-                                execute!(stdout(), Clear(ClearType::All))?;
                             }
                             menu::Action::Quit => return Ok(()),
                             menu::Action::SwitchCamera(idx) => {
@@ -167,11 +166,9 @@ fn run(
                             }
                             menu::Action::CycleMode(dir) => {
                                 cfg.mode = cfg.mode.cycle(dir);
-                                execute!(stdout(), Clear(ClearType::All))?;
                             }
                             menu::Action::CycleDepth(dir) => {
                                 cfg.depth = cfg.depth.cycle(dir);
-                                execute!(stdout(), Clear(ClearType::All))?;
                             }
                             menu::Action::ToggleMirror => cfg.mirror = !cfg.mirror,
                             menu::Action::AdjustBrightness(d) => {
@@ -219,9 +216,7 @@ fn run(
                         }
                     }
                 }
-                Event::Resize(_, _) => {
-                    execute!(stdout(), Clear(ClearType::All))?;
-                }
+                Event::Resize(_, _) => {}
                 _ => {}
             }
         }
@@ -235,7 +230,21 @@ fn run(
 
         let frame_opt = capture.frame.lock().clone();
         if let Some(frame) = frame_opt {
-            render::render(&frame, cols, rows, cfg, time, &mut render_state, &mut scratch);
+            let menu_mask = if *in_menu {
+                Some(menu::bounds(menu_state, cols, rows))
+            } else {
+                None
+            };
+            render::render(
+                &frame,
+                cols,
+                rows,
+                cfg,
+                time,
+                &mut render_state,
+                menu_mask,
+                &mut scratch,
+            );
             if *in_menu {
                 menu::draw(menu_state, cfg, cols, rows, &mut scratch);
             }
