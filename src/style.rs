@@ -3,6 +3,7 @@
 //! Each style is a pure `(rgb, StyleCtx) -> rgb` function. The renderer
 //! calls it per cell per frame, so everything here needs to be cheap.
 //!
+//! - **Vivid** — saturation boost in HSV with a gentle gamma lift on value.
 //! - **Sepia** — single affine RGB matrix.
 //! - **Van Gogh** — static palette snap. Source hue picks one of three
 //!   Van Gogh color ramps (cool / warm / green), source luma picks the
@@ -22,6 +23,7 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Style {
     Color,
+    Vivid,
     BlackWhite,
     Sepia,
     VanGogh,
@@ -30,8 +32,9 @@ pub enum Style {
     Lsd,
 }
 
-pub const ALL: [Style; 7] = [
+pub const ALL: [Style; 8] = [
     Style::Color,
+    Style::Vivid,
     Style::BlackWhite,
     Style::Sepia,
     Style::VanGogh,
@@ -44,6 +47,7 @@ impl Style {
     pub fn label(self) -> &'static str {
         match self {
             Style::Color => "Color",
+            Style::Vivid => "Vivid",
             Style::BlackWhite => "B&W",
             Style::Sepia => "Sepia",
             Style::VanGogh => "Van Gogh",
@@ -76,12 +80,21 @@ pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8
     let (r, g, b) = rgb;
     match style {
         Style::Color | Style::BlackWhite => (r, g, b),
+        Style::Vivid => vivid(r, g, b),
         Style::Sepia => sepia(r, g, b),
         Style::VanGogh => van_gogh(r, g, b),
         Style::Monet => monet(r, g, b, ctx),
         Style::Mushroom => mushroom(r, g, b, ctx),
         Style::Lsd => lsd(r, g, b, ctx),
     }
+}
+
+// ─── Vivid: saturation boost + mild gamma lift ──────────────────────────────
+fn vivid(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let (h, s, v) = rgb_to_hsv(r, g, b);
+    let s = (s * 1.55 + 0.04).clamp(0.0, 1.0);
+    let v = v.powf(0.85);
+    hsv_to_rgb(h, s, v)
 }
 
 // ─── Sepia ──────────────────────────────────────────────────────────────────
