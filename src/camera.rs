@@ -19,6 +19,11 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+/// Captures the most recent capture-thread error so the UI can show it
+/// instead of an indefinite "waiting for camera…" hang. Wrapped in `Arc`
+/// so the spawned thread can write it from any scope.
+pub type SharedError = Arc<Mutex<Option<String>>>;
+
 #[derive(Clone)]
 pub struct Frame {
     pub width: u32,
@@ -48,6 +53,7 @@ pub type SharedFrame = Arc<Mutex<Option<Frame>>>;
 
 pub struct CaptureHandle {
     pub frame: SharedFrame,
+    pub error: SharedError,
     running: Arc<AtomicBool>,
 }
 
@@ -65,9 +71,11 @@ impl Drop for CaptureHandle {
 
 pub fn spawn_capture(camera_index: u32) -> Result<CaptureHandle> {
     let frame: SharedFrame = Arc::new(Mutex::new(None));
+    let error: SharedError = Arc::new(Mutex::new(None));
     let running = Arc::new(AtomicBool::new(true));
 
     let frame_c = frame.clone();
+    let error_c = error.clone();
     let running_c = running.clone();
 
     thread::spawn(move || {
@@ -76,9 +84,13 @@ pub fn spawn_capture(camera_index: u32) -> Result<CaptureHandle> {
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
         let mut camera = match Camera::new(index, requested) {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                *error_c.lock() = Some(format!("camera open failed: {e}"));
+                return;
+            }
         };
-        if camera.open_stream().is_err() {
+        if let Err(e) = camera.open_stream() {
+            *error_c.lock() = Some(format!("camera stream open failed: {e}"));
             return;
         }
 
@@ -98,5 +110,5 @@ pub fn spawn_capture(camera_index: u32) -> Result<CaptureHandle> {
         let _ = camera.stop_stream();
     });
 
-    Ok(CaptureHandle { frame, running })
+    Ok(CaptureHandle { frame, error, running })
 }

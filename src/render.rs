@@ -88,12 +88,22 @@ impl RenderConfig {
     }
 }
 
-/// Per-frame state that survives between renders. Currently used only by
-/// Lucy's afterimage feedback buffer — the live render loop owns one of these
-/// and passes a mutable reference into `render`. Reset whenever the terminal
-/// resizes or the active style changes, so trails never leak across modes.
+/// Per-frame state that survives between renders. Currently used by
+/// Lucy's afterimage feedback buffer and Infrared's motion accumulator.
+/// The live render loop owns one of these and passes a mutable reference
+/// into `render`. Reset whenever the terminal resizes or the active style
+/// changes, so trails / motion never leak across modes.
 pub struct RenderState {
     trails: Vec<(u8, u8, u8)>,
+    /// Previous-frame block-average luma per cell, scaled to `[0, 255]`.
+    prev_luma: Vec<u8>,
+    /// Motion accumulator per cell, `[0, 1]`. Decays each frame; rises with
+    /// frame-to-frame luma difference.
+    motion: Vec<f32>,
+    /// True for the single frame after a reset. While set, motion-buffer
+    /// updates seed `prev_luma` without computing a diff, so a fresh state
+    /// (resize / style change) doesn't read as a full-frame motion burst.
+    first_frame: bool,
     cols: u16,
     rows: u16,
     last_style: Option<Style>,
@@ -103,6 +113,9 @@ impl RenderState {
     pub fn new() -> Self {
         Self {
             trails: Vec::new(),
+            prev_luma: Vec::new(),
+            motion: Vec::new(),
+            first_frame: true,
             cols: 0,
             rows: 0,
             last_style: None,
@@ -116,10 +129,21 @@ impl RenderState {
         if resized || style_changed || self.trails.len() != needed {
             self.trails.clear();
             self.trails.resize(needed, (0, 0, 0));
+            self.prev_luma.clear();
+            self.prev_luma.resize(needed, 0);
+            self.motion.clear();
+            self.motion.resize(needed, 0.0);
+            self.first_frame = true;
             self.cols = cols;
             self.rows = rows;
         }
         self.last_style = Some(style);
+    }
+
+    /// Mark the just-completed render as no longer the initial frame, so
+    /// subsequent calls compute motion diffs against the now-seeded history.
+    fn end_frame(&mut self) {
+        self.first_frame = false;
     }
 }
 
@@ -138,6 +162,11 @@ const CHAR_ASPECT: f32 = 2.0;
 /// 30 FPS (~140 ms). Static scenes converge to the steady-state color so they
 /// stay sharp; motion smears across the decay window.
 const LUCY_TRAIL_DECAY: f32 = 0.85;
+
+/// Infrared motion accumulator decay. 0.92 → half-life ~8 frames (~270 ms at
+/// 30 FPS). New motion energy is added as `diff * MOTION_GAIN` capped to 1.0.
+const MOTION_DECAY: f32 = 0.92;
+const MOTION_GAIN: f32 = 2.0;
 const SCREENSHOT_CELL_WIDTH: usize = 8;
 const SCREENSHOT_CELL_HEIGHT: usize = 16;
 const SCREENSHOT_FONT_SCALE: f32 = 15.0;
@@ -229,15 +258,24 @@ pub fn render(
         while c < cols {
             if let Some((mx0, mx1)) = row_mask {
                 if c == mx0 {
-                    // Decay the Lucy trail buffer under the masked rectangle so
-                    // those cells fade naturally while the menu is open. Without
-                    // this, masked cells keep their pre-menu trail values, and a
-                    // ghost rectangle pops back when the menu closes.
-                    if cfg.style == Style::Lucy {
-                        for skip_c in mx0..mx1 {
-                            let idx = (r as usize) * (cols as usize) + (skip_c as usize);
+                    // Update style-specific persistent buffers for masked cells
+                    // so closing the menu doesn't reveal stale state — Lucy
+                    // would otherwise show a ghost rectangle, and Infrared
+                    // would burst false heat against an out-of-date prev_luma.
+                    for skip_c in mx0..mx1 {
+                        let idx = (r as usize) * (cols as usize) + (skip_c as usize);
+                        if cfg.style == Style::Lucy {
                             state.trails[idx] =
                                 blend_rgb(state.trails[idx], (0, 0, 0), LUCY_TRAIL_DECAY);
+                        }
+                        if cfg.style == Style::Infrared {
+                            // Keep prev_luma current so the first unmasked
+                            // frame diffs against today's source, not the
+                            // pre-menu value. Motion still decays toward 0
+                            // since these cells aren't being shown.
+                            state.prev_luma[idx] =
+                                block_luma_avg(frame, &geometry, skip_c, r, cfg.mirror);
+                            state.motion[idx] *= MOTION_DECAY;
                         }
                     }
                     let _ = write!(out, "\x1b[{}C", mx1 - mx0);
@@ -246,7 +284,7 @@ pub fn render(
                 }
             }
 
-            let Some(mut cell) = sample_cell(frame, &geometry, c, r, cfg, time) else {
+            let Some(mut cell) = sample_cell(frame, &geometry, c, r, cfg, time, Some(state)) else {
                 out.push(' ');
                 c += 1;
                 continue;
@@ -278,6 +316,7 @@ pub fn render(
         }
         last_fg = None;
     }
+    state.end_frame();
 }
 
 pub fn render_screenshot(
@@ -299,7 +338,7 @@ pub fn render_screenshot(
 
     for cell_y in 0..rows {
         for cell_x in 0..cols {
-            if let Some(cell) = sample_cell(frame, &geometry, cell_x, cell_y, cfg, time) {
+            if let Some(cell) = sample_cell(frame, &geometry, cell_x, cell_y, cfg, time, None) {
                 let color = if cell.emit_color {
                     color::quantize_rgb(cfg.effective_depth(), cell.rgb.0, cell.rgb.1, cell.rgb.2)
                 } else {
@@ -478,6 +517,7 @@ fn sample_cell(
     r: u16,
     cfg: &RenderConfig,
     time: f32,
+    state: Option<&mut RenderState>,
 ) -> Option<RenderedCell> {
     let (warp_dx_px, warp_dy_px) = if cfg.style == Style::Alice {
         alice_warp_pixels(geometry, c, r, time, cfg.mirror)
@@ -540,6 +580,31 @@ fn sample_cell(
 
     let (edge_x, edge_y, edge) =
         sample_edge(frame, geometry, c, r, cfg.mirror, warp_dx_px, warp_dy_px);
+
+    // Motion accumulator: frame-to-frame block-luma diff feeds an
+    // exponentially-decaying buffer per cell. Skipped during one-shot
+    // screenshots (state is None) since temporal motion has no meaning there.
+    // On the first frame after a reset we seed `prev_luma` without computing
+    // a diff — otherwise the all-zero history would read as a full-frame
+    // motion burst as soon as Infrared started.
+    let motion = if let Some(state) = state {
+        let pre_luma_u8 = block_luma_avg(frame, geometry, c, r, cfg.mirror);
+        let idx = (r as usize) * (geometry.cols as usize) + (c as usize);
+        if state.first_frame {
+            state.prev_luma[idx] = pre_luma_u8;
+            0.0
+        } else {
+            let diff = (pre_luma_u8 as f32 - state.prev_luma[idx] as f32).abs() / 255.0;
+            state.prev_luma[idx] = pre_luma_u8;
+            let new_motion =
+                (state.motion[idx] * MOTION_DECAY + diff * MOTION_GAIN).clamp(0.0, 1.0);
+            state.motion[idx] = new_motion;
+            new_motion
+        }
+    } else {
+        0.0
+    };
+
     let ctx = StyleCtx {
         time,
         x: c,
@@ -549,6 +614,7 @@ fn sample_cell(
         edge_x,
         edge_y,
         edge,
+        motion,
     };
     let rgb = style::transform(cfg.style, (avg_r, avg_g, avg_b), &ctx);
     let luma = (0.299 * rgb.0 as f32 + 0.587 * rgb.1 as f32 + 0.114 * rgb.2 as f32) / 255.0;
@@ -615,6 +681,46 @@ fn alice_ca_offset_pixels(
 /// Block-average a single channel of the source frame over the cell's
 /// (warp + per-channel) sampling window. The window is *edge-clamped*: when
 /// the offset pushes its start past either edge of the frame, we slide the
+/// Block-average luma over the cell's source-frame region (no warp, no CA,
+/// no brightness/contrast). Used by the motion accumulator so it always
+/// observes the raw frame, including for cells that the renderer is
+/// otherwise skipping (e.g. under the menu mask).
+fn block_luma_avg(
+    frame: &Frame,
+    geometry: &RenderGeometry,
+    c: u16,
+    r: u16,
+    mirror: bool,
+) -> u8 {
+    let cx = if mirror { geometry.cols - 1 - c } else { c };
+    let raw_y0 = geometry.crop_y0 + r as f32 * geometry.cell_h;
+    let raw_y1 = geometry.crop_y0 + (r + 1) as f32 * geometry.cell_h;
+    let raw_x0 = geometry.crop_x0 + cx as f32 * geometry.cell_w;
+    let raw_x1 = geometry.crop_x0 + (cx + 1) as f32 * geometry.cell_w;
+    let y0 = raw_y0.clamp(0.0, geometry.fh as f32) as usize;
+    let y1 = raw_y1.clamp(0.0, geometry.fh as f32) as usize;
+    let x0 = raw_x0.clamp(0.0, geometry.fw as f32) as usize;
+    let x1 = raw_x1.clamp(0.0, geometry.fw as f32) as usize;
+
+    let (mut s, mut n) = (0u64, 0u64);
+    for y in y0..y1 {
+        let row_off = y * geometry.fw * 3;
+        for x in x0..x1 {
+            let i = row_off + x * 3;
+            let lr = frame.rgb[i] as f32;
+            let lg = frame.rgb[i + 1] as f32;
+            let lb = frame.rgb[i + 2] as f32;
+            s += (0.299 * lr + 0.587 * lg + 0.114 * lb) as u64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0
+    } else {
+        (s / n).min(255) as u8
+    }
+}
+
 /// whole window back so it samples the nearest in-bounds region at full
 /// width. That produces a stretched border instead of a black fringe at
 /// the screen edges (returning 0 here meant any channel pushed off-frame
