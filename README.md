@@ -4,15 +4,38 @@ Live webcam → ASCII art in your terminal. 95-char density ramp, truecolor
 output, painterly color styles, optional solid-block rendering, and a few
 fractal-driven psychedelic modes.
 
-![styles](https://img.shields.io/badge/styles-7-blue) ![render](https://img.shields.io/badge/render-ASCII%20%7C%20Blocks-green) ![rust](https://img.shields.io/badge/rust-2021-orange) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![styles](https://img.shields.io/badge/styles-8-blue) ![render](https://img.shields.io/badge/render-ASCII%20%7C%20Blocks-green) ![rust](https://img.shields.io/badge/rust-2021-orange) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## Install
+
+### Vanilla macOS (no cargo / no Rust yet)
+
+If you've never built a Rust project on this Mac, you need the Xcode
+linker and the Rust toolchain. Both installs are one command each.
+
+```sh
+# 1. Xcode Command Line Tools (needed for the linker — pops up a GUI prompt)
+xcode-select --install
+
+# 2. Rust toolchain via rustup (installs cargo into ~/.cargo/bin)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 3. Pick up the new PATH in this shell session
+source "$HOME/.cargo/env"
+```
+
+After `rustc --version` prints something, follow the steps below.
+
+### With cargo
 
 ```sh
 cargo install --git https://github.com/bluevisor/terminal-cam
 ```
 
-or clone and run:
+The binary lands in `~/.cargo/bin/terminal-cam` (already on `PATH` if
+you sourced `$HOME/.cargo/env`). Run it with `terminal-cam`.
+
+Or clone and run from the source tree:
 
 ```sh
 git clone https://github.com/bluevisor/terminal-cam
@@ -21,7 +44,7 @@ cargo run --release
 ```
 
 macOS will prompt for camera permission on first launch — grant it to your
-terminal application.
+terminal application (System Settings → Privacy & Security → Camera).
 
 ## Controls
 
@@ -37,7 +60,7 @@ terminal application.
 ## Options
 
 - **Camera source** — cycle detected cameras
-- **Style** — `Color`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Mushroom`, `LSD`
+- **Style** — `Color`, `Vivid`, `B&W`, `Sepia`, `Van Gogh`, `Monet`, `Mushroom`, `LSD`
   - `Van Gogh` — static palette snap. Source hue picks one of three ramps
     (cool / warm / green), source luma picks the anchor within it.
     Hand-curated from Starry Night, Irises, and the self-portrait.
