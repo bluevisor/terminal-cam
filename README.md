@@ -4,7 +4,7 @@ Live webcam → ASCII art in your terminal. 95-char density ramp, truecolor
 output, painterly color styles, optional solid-block rendering, and a few
 fractal-driven psychedelic modes.
 
-![styles](https://img.shields.io/badge/styles-9-blue) ![render](https://img.shields.io/badge/render-ASCII%20%7C%20Blocks-green) ![rust](https://img.shields.io/badge/rust-2021-orange) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![styles](https://img.shields.io/badge/styles-11-blue) ![render](https://img.shields.io/badge/render-ASCII%20%7C%20Blocks-green) ![rust](https://img.shields.io/badge/rust-2021-orange) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## Install
 
@@ -60,7 +60,8 @@ terminal application (System Settings → Privacy & Security → Camera).
 ## Options
 
 - **Camera source** — cycle detected cameras
-- **Style** — `Color`, `Vivid`, `B&W`, `Grayscale`, `Sepia`, `Van Gogh`, `Monet`, `Alice`, `Lucy`
+- **Style** — `Color`, `Vivid`, `B&W`, `Gray 5-Step`, `Grayscale`, `Sepia`,
+  `Infrared`, `Van Gogh`, `Monet`, `Alice`, `Lucy`
   - `Van Gogh` — static palette snap. Source hue picks one of three ramps
     (cool / warm / green), source luma picks the anchor within it.
     Hand-curated from Starry Night, Irises, and the self-portrait.
@@ -77,8 +78,9 @@ terminal application (System Settings → Privacy & Security → Camera).
     them; an afterimage feedback buffer leaves fading rainbow trails
     behind motion.
 - **Render mode** — `ASCII` (density-ramp glyphs) or `Blocks` (solid `█`
-  in color styles so the color escape alone carries the image; `░▒▓█`
-  shading ramp in B&W).
+  in color styles so the color escape alone carries the image; 1-bit
+  ordered dither over `' '`/`█` in B&W; `░▒▓█` shading ramp in
+  `Gray 5-Step`).
 - **Color depth** — `auto` / `truecolor` / `256` / `16`. Auto-detects from
   `COLORTERM`; falls back to 256-color for terminals that don't speak
   24-bit.
@@ -93,6 +95,41 @@ terminal application (System Settings → Privacy & Security → Camera).
 
 Screenshots are saved as PNG files using the current terminal crop, mirror,
 style, brightness, contrast, and render mode settings.
+
+## Virtual camera (macOS)
+
+`terminal-cam --virtual-cam` publishes the styled feed as a system-wide
+camera called **Terminal Cam** that any video app (Zoom, Meet, FaceTime,
+QuickTime…) can select. Frames are rasterized at 1280×720 (160×45 cells,
+8×16 px each) with the same style, mode, and color settings as the
+terminal view.
+
+This uses a CoreMediaIO camera extension, which macOS requires to be
+shipped inside a signed app. One-time setup:
+
+```sh
+# 1. Build and install the camera app (needs Xcode + xcodegen, and an
+#    Apple Developer account signed into Xcode for automatic signing)
+./macos/install.sh
+
+# 2. Notarize (system extensions must be Developer ID signed + notarized;
+#    install.sh prints the exact commands, or see macos/install.sh)
+
+# 3. Launch the app it installed (/Applications/TerminalCamCamera.app),
+#    click “Install / Update Extension”, and approve it in System Settings
+#    (macOS 26+: Privacy & Security → Extensions; earlier: General →
+#    Login Items & Extensions → Camera Extensions).
+```
+
+**MDM-managed Macs:** if activation fails and `log show` reports
+`sysextd: no policy`, the machine's MDM must allowlist the extension.
+Push `macos/allow-terminal-cam-extension.mobileconfig` (a
+`com.apple.system-extension-policy` payload allowing team `CKGXYS3R8N` /
+`com.bluevisor.terminalcam.extension`) from your MDM, then retry.
+
+Then run `terminal-cam --virtual-cam`. The status bar reports when the
+virtual camera connects; while terminal-cam isn't running, apps see a
+placeholder card. Uninstall any time from TerminalCamCamera.app.
 
 ## Terminal compatibility
 
@@ -119,7 +156,10 @@ Per terminal cell, every frame:
 5. Pick a glyph:
    - **ASCII**: sigmoid-shaped luma indexes the 95-char density ramp.
    - **Blocks** (color): solid `█` — color escape carries brightness.
-   - **Blocks** (B&W): `░▒▓█` shading ramp, since there's no color channel.
+   - **Blocks** (B&W): 4×4 Bayer ordered dither to `' '` or `█` — pure
+     black and white, no gray shades, since there's no color channel.
+   - **Blocks** (Gray 5-Step): the `░▒▓█` shading ramp — same no-color
+     path as B&W, but partial-coverage glyphs give five gray steps.
 6. Quantize the fg color to the selected depth (truecolor / 256-palette /
    ANSI-16) and emit the escape + glyph.
 

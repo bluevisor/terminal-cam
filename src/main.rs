@@ -6,6 +6,7 @@ mod menu;
 mod render;
 mod screenshot;
 mod style;
+mod vcam;
 
 use anyhow::{anyhow, Result};
 use crossterm::{
@@ -24,6 +25,10 @@ use std::time::{Duration, Instant};
 const TARGET_FPS: u32 = 30;
 
 fn main() -> Result<()> {
+    let mut virtual_cam = std::env::args()
+        .any(|arg| arg == "--virtual-cam")
+        .then(vcam::VirtualCam::new);
+
     let cameras = camera::list_cameras()?;
     if cameras.is_empty() {
         return Err(anyhow!("no cameras found"));
@@ -58,6 +63,7 @@ fn main() -> Result<()> {
         &mut current_camera,
         &mut in_menu,
         &mut app_config,
+        &mut virtual_cam,
     );
 
     execute!(
@@ -110,6 +116,7 @@ fn run(
     current_camera: &mut u32,
     in_menu: &mut bool,
     app_config: &mut config::AppConfig,
+    virtual_cam: &mut Option<vcam::VirtualCam>,
 ) -> Result<()> {
     let frame_budget = Duration::from_micros(1_000_000 / TARGET_FPS as u64);
     let mut scratch = String::with_capacity(1 << 18);
@@ -230,6 +237,26 @@ fn run(
 
         let frame_opt = capture.frame.lock().clone();
         if let Some(frame) = frame_opt {
+            if let Some(vc) = virtual_cam.as_mut() {
+                match vc.push(&frame, cfg, time) {
+                    vcam::VcamEvent::Connected => set_status(
+                        &mut status,
+                        "virtual camera: connected — select “Terminal Cam” in your video app"
+                            .to_string(),
+                    ),
+                    vcam::VcamEvent::Waiting => set_status(
+                        &mut status,
+                        "virtual camera: device not found — install it via TerminalCamCamera.app"
+                            .to_string(),
+                    ),
+                    vcam::VcamEvent::Disconnected => set_status(
+                        &mut status,
+                        "virtual camera: connection lost, retrying…".to_string(),
+                    ),
+                    vcam::VcamEvent::None => {}
+                }
+            }
+
             let menu_mask = if *in_menu {
                 Some(menu::bounds(menu_state, cols, rows))
             } else {

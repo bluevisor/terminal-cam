@@ -36,16 +36,45 @@ pub fn luma_to_char(luma: f32, contrast: f32, color: bool) -> char {
     RAMP[idx]
 }
 
-/// 5-stop Unicode shading ramp. Used for B&W + Blocks mode where there's
-/// no color channel to carry brightness, so the glyph itself must. Same
-/// gamma 1.5 tone curve as `luma_to_char` so a midtone luma shifts from
-/// `▒` down to `░`, matching the perceived brightness of a B&W photo.
+/// 5-stop Unicode shading ramp. Used for the `Gray 5-Step` style + Blocks
+/// mode where there's no color channel to carry brightness, so the glyph
+/// itself must. Same gamma 1.5 tone curve as `luma_to_char` so a midtone
+/// luma shifts from `▒` down to `░`, matching the perceived brightness of
+/// a B&W photo. Partial-coverage glyphs read as gray, which is the point
+/// here and exactly what `luma_to_bilevel` avoids for true B&W.
 pub fn luma_to_shade(luma: f32, contrast: f32) -> char {
     const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
     let boosted = ((luma - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
     let toned = boosted.powf(1.5);
     let idx = (toned * (SHADES.len() - 1) as f32).round() as usize;
     SHADES[idx]
+}
+
+/// Classic 4×4 Bayer ordered-dither matrix. Cell `(x % 4, y % 4)` picks a
+/// threshold; the spread of thresholds across the tile turns a hard cutoff
+/// into a stable halftone pattern instead of blotchy solid regions.
+const BAYER4: [[u8; 4]; 4] = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+];
+
+/// 1-bit black/white for B&W + Blocks mode: every cell is either empty or a
+/// solid `█`, never a partial-coverage shade (`░▒▓` read as gray, which B&W
+/// mode shouldn't produce). Midtones survive as an ordered-dither halftone
+/// rather than collapsing to one side of a global threshold. Same gamma 1.5
+/// tone curve as `luma_to_char`'s B&W path so the two modes agree on where
+/// a midtone sits.
+pub fn luma_to_bilevel(luma: f32, contrast: f32, x: u16, y: u16) -> char {
+    let boosted = ((luma - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+    let toned = boosted.powf(1.5);
+    let threshold = (BAYER4[(y % 4) as usize][(x % 4) as usize] as f32 + 0.5) / 16.0;
+    if toned > threshold {
+        '█'
+    } else {
+        ' '
+    }
 }
 
 #[cfg(test)]
@@ -69,6 +98,50 @@ mod tests {
         // should render as space, peak white as '$'.
         assert_eq!(luma_to_char(0.0, 1.0, false), ' ');
         assert_eq!(luma_to_char(1.0, 1.0, false), '$');
+    }
+
+    #[test]
+    fn shade_ramp_spans_all_five_stops() {
+        let seen: Vec<char> = (0..=100)
+            .map(|i| luma_to_shade(i as f32 / 100.0, 1.0))
+            .collect();
+        for stop in [' ', '░', '▒', '▓', '█'] {
+            assert!(seen.contains(&stop), "shade ramp never emitted {stop:?}");
+        }
+    }
+
+    #[test]
+    fn bilevel_emits_only_space_or_full_block() {
+        for luma_step in 0..=100 {
+            let luma = luma_step as f32 / 100.0;
+            for y in 0..4u16 {
+                for x in 0..4u16 {
+                    let ch = luma_to_bilevel(luma, 1.0, x, y);
+                    assert!(ch == ' ' || ch == '█', "got gray shade {ch:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bilevel_dithers_midtones_across_the_tile() {
+        // A midtone should light up some cells of the 4×4 tile and leave
+        // others empty — that spread is what keeps detail without gray.
+        let lit = (0..4u16)
+            .flat_map(|y| (0..4u16).map(move |x| (x, y)))
+            .filter(|&(x, y)| luma_to_bilevel(0.75, 1.0, x, y) == '█')
+            .count();
+        assert!(lit > 0 && lit < 16, "expected a mixed tile, got {lit}/16 lit");
+    }
+
+    #[test]
+    fn bilevel_saturates_extremes() {
+        for y in 0..4u16 {
+            for x in 0..4u16 {
+                assert_eq!(luma_to_bilevel(0.0, 1.0, x, y), ' ');
+                assert_eq!(luma_to_bilevel(1.0, 1.0, x, y), '█');
+            }
+        }
     }
 
     #[test]

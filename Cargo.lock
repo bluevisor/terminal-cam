@@ -918,6 +918,7 @@ version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "cc",
  "crossterm",
  "nokhwa",
  "parking_lot",

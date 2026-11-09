@@ -33,14 +33,17 @@
 //!   contours instead of straight across them. The flow value drives full
 //!   hue rotation and value-by-flow modulation.
 //!
-//! `Color` and `BlackWhite` are passthrough — the only difference is
-//! whether the renderer emits ANSI color escapes at all.
+//! `Color`, `BlackWhite`, and `GrayFive` are passthrough — the difference is
+//! whether the renderer emits ANSI color escapes at all (`Color` does, the
+//! other two don't) and, in Blocks mode, whether luma becomes a pure 1-bit
+//! dither (`BlackWhite`) or the 5-stop `░▒▓█` shade ramp (`GrayFive`).
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Style {
     Color,
     Vivid,
     BlackWhite,
+    GrayFive,
     Grayscale,
     Sepia,
     Infrared,
@@ -50,10 +53,11 @@ pub enum Style {
     Lucy,
 }
 
-pub const ALL: [Style; 10] = [
+pub const ALL: [Style; 11] = [
     Style::Color,
     Style::Vivid,
     Style::BlackWhite,
+    Style::GrayFive,
     Style::Grayscale,
     Style::Sepia,
     Style::Infrared,
@@ -69,6 +73,7 @@ impl Style {
             Style::Color => "Color",
             Style::Vivid => "Vivid",
             Style::BlackWhite => "B&W",
+            Style::GrayFive => "Gray 5-Step",
             Style::Grayscale => "Grayscale",
             Style::Sepia => "Sepia",
             Style::Infrared => "Infrared",
@@ -80,7 +85,7 @@ impl Style {
     }
 
     pub fn emits_color(self) -> bool {
-        !matches!(self, Style::BlackWhite)
+        !matches!(self, Style::BlackWhite | Style::GrayFive)
     }
 
     pub fn cycle(self, dir: i32) -> Self {
@@ -112,7 +117,7 @@ pub struct StyleCtx {
 pub fn transform(style: Style, rgb: (u8, u8, u8), ctx: &StyleCtx) -> (u8, u8, u8) {
     let (r, g, b) = rgb;
     match style {
-        Style::Color | Style::BlackWhite => (r, g, b),
+        Style::Color | Style::BlackWhite | Style::GrayFive => (r, g, b),
         Style::Vivid => vivid(r, g, b),
         Style::Grayscale => grayscale(r, g, b),
         Style::Sepia => sepia(r, g, b),
