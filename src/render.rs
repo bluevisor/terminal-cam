@@ -44,6 +44,10 @@ impl RenderMode {
         }
     }
 
+    pub fn from_name(name: &str) -> Option<Self> {
+        crate::names::find(&MODE_CYCLE, name, |m| [m.label(), m.label()])
+    }
+
     pub fn cycle(self, dir: i32) -> Self {
         let idx = MODE_CYCLE.iter().position(|&m| m == self).unwrap_or(0) as i32;
         let n = MODE_CYCLE.len() as i32;

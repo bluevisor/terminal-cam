@@ -21,17 +21,19 @@ pub fn save(
 
     let image = render::render_screenshot(frame, cols, rows, cfg, time)
         .ok_or_else(|| anyhow!("terminal size is too small for a screenshot"))?;
-    let path = dir.join(screenshot_name()?);
+    let path = dir.join(timestamped_name("png")?);
     write_png(&path, image.width, image.height, &image.rgb)?;
     Ok(path)
 }
 
-fn screenshot_name() -> Result<String> {
+/// `terminal-cam-<unix secs>-<ms>.<ext>` — sortable and collision-free
+/// for anything short of two captures in the same millisecond.
+pub fn timestamped_name(ext: &str) -> Result<String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system time is before unix epoch")?;
     Ok(format!(
-        "terminal-cam-{}-{:03}.png",
+        "terminal-cam-{}-{:03}.{ext}",
         now.as_secs(),
         now.subsec_millis()
     ))

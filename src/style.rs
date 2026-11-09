@@ -84,6 +84,29 @@ impl Style {
         }
     }
 
+    /// Stable lowercase name used by the config file and `--style`.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Style::Color => "color",
+            Style::Vivid => "vivid",
+            Style::BlackWhite => "bw",
+            Style::GrayFive => "gray5",
+            Style::Grayscale => "grayscale",
+            Style::Sepia => "sepia",
+            Style::Infrared => "infrared",
+            Style::VanGogh => "van-gogh",
+            Style::Monet => "monet",
+            Style::Alice => "alice",
+            Style::Lucy => "lucy",
+        }
+    }
+
+    /// Accepts the slug or the menu label, ignoring case and punctuation
+    /// (`van-gogh`, `"Van Gogh"`, `vangogh`, `B&W`, `bw` all work).
+    pub fn from_name(name: &str) -> Option<Self> {
+        crate::names::find(&ALL, name, |s| [s.slug(), s.label()])
+    }
+
     pub fn emits_color(self) -> bool {
         !matches!(self, Style::BlackWhite | Style::GrayFive)
     }

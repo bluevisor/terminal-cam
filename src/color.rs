@@ -42,6 +42,16 @@ impl ColorDepth {
         }
     }
 
+    pub fn from_name(name: &str) -> Option<Self> {
+        let aliases = |d: &ColorDepth| match d {
+            ColorDepth::Auto => ["auto", "auto"],
+            ColorDepth::Truecolor => ["truecolor", "24bit"],
+            ColorDepth::Palette256 => ["256", "palette256"],
+            ColorDepth::Ansi16 => ["16", "ansi16"],
+        };
+        crate::names::find(&CYCLE, name, aliases)
+    }
+
     pub fn cycle(self, dir: i32) -> Self {
         let idx = CYCLE.iter().position(|&d| d == self).unwrap_or(0) as i32;
         let n = CYCLE.len() as i32;
