@@ -1,0 +1,52 @@
+name: TerminalCamCamera
+options:
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: CKGXYS3R8N
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: 0.1.1
+    CURRENT_PROJECT_VERSION: 1
+
+targets:
+  TerminalCamCamera:
+    type: application
+    platform: macOS
+    productName: TerminalCam Camera
+    sources:
+      - path: App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bluevisor.terminalcam
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: TerminalCam Camera
+        LSApplicationCategoryType: public.app-category.utilities
+        NSSystemExtensionUsageDescription: Installs the Terminal Cam virtual camera extension.
+    dependencies:
+      - target: TerminalCamExtension
+        embed: true
+        codeSign: true
+
+  TerminalCamExtension:
+    type: system-extension
+    platform: macOS
+    productName: com.bluevisor.terminalcam.extension
+    sources:
+      - path: Extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bluevisor.terminalcam.extension
+        CODE_SIGN_ENTITLEMENTS: Extension/Extension.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+    info:
+      path: Extension/Info.plist
+      properties:
+        CFBundlePackageType: SYSX
+        CMIOExtension:
+          CMIOExtensionMachServiceName: $(TeamIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)

@@ -18,15 +18,16 @@ use crate::{
     style::{self, Style, StyleCtx},
 };
 use ab_glyph::{point, Font, FontArc, ScaleFont};
-use std::{fmt::Write as FmtWrite, fs, io::Write, sync::OnceLock};
+use std::{collections::HashMap, fmt::Write as FmtWrite, fs, io::Write, sync::OnceLock};
 
 /// How each cell's glyph is chosen.
 ///
 /// - `Ascii`: density-ramped ASCII glyph — luma picks from 95-char ramp;
 ///   shape is the primary signal (though fg color still varies).
 /// - `Blocks`: solid `█` (U+2588) in color styles, so *color* alone carries
-///   the image. In B&W style we fall back to the `░▒▓█` shading ramp
-///   because a solid block with no color would be information-free.
+///   the image. In B&W style, where a solid block with no color would be
+///   information-free, luma becomes a 1-bit ordered dither over `' '` and
+///   `█` — pure black and white, no gray partial-coverage shades.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RenderMode {
     Ascii,
@@ -478,6 +479,183 @@ fn blend_channel(dst: &mut u8, src: u8, coverage: f32) {
     *dst = (*dst as f32 * (1.0 - coverage) + src as f32 * coverage).round() as u8;
 }
 
+const STREAM_CELL_PIXELS: usize = SCREENSHOT_CELL_WIDTH * SCREENSHOT_CELL_HEIGHT;
+
+/// Pixel size of a rasterized cell grid, used to size the virtual-camera
+/// frame (cols × 8, rows × 16).
+pub fn stream_pixel_size(cols: u16, rows: u16) -> (u32, u32) {
+    (
+        cols as u32 * SCREENSHOT_CELL_WIDTH as u32,
+        rows as u32 * SCREENSHOT_CELL_HEIGHT as u32,
+    )
+}
+
+/// Reusable buffers for the continuous BGRA raster feeding the virtual
+/// camera. Produces the same image as `render_screenshot`, but caches each
+/// character's coverage mask so steady-state frames only blit — re-outlining
+/// every glyph at 30 fps would dominate the frame budget.
+pub struct StreamRaster {
+    glyph_masks: HashMap<char, [f32; STREAM_CELL_PIXELS]>,
+    pub bgra: Vec<u8>,
+}
+
+impl StreamRaster {
+    pub fn new() -> Self {
+        Self {
+            glyph_masks: HashMap::new(),
+            bgra: Vec::new(),
+        }
+    }
+}
+
+/// Rasterizes one styled frame into `raster.bgra` (tight rows, alpha 255).
+/// Returns false when nothing can be drawn (degenerate size, or no font
+/// available for a glyph mode).
+pub fn render_stream_bgra(
+    frame: &Frame,
+    cols: u16,
+    rows: u16,
+    cfg: &RenderConfig,
+    time: f32,
+    state: &mut RenderState,
+    raster: &mut StreamRaster,
+) -> bool {
+    let Some(geometry) = RenderGeometry::new(frame, cols, rows) else {
+        return false;
+    };
+    let font = screenshot_font();
+    if font.is_none() && !(cfg.mode == RenderMode::Blocks && cfg.style.emits_color()) {
+        return false;
+    }
+
+    let width = usize::from(cols) * SCREENSHOT_CELL_WIDTH;
+    let height = usize::from(rows) * SCREENSHOT_CELL_HEIGHT;
+    raster.bgra.resize(width * height * 4, 0);
+    for px in raster.bgra.chunks_exact_mut(4) {
+        px[0] = 0;
+        px[1] = 0;
+        px[2] = 0;
+        px[3] = 255;
+    }
+
+    state.prepare(cols, rows, cfg.style);
+    let depth = cfg.effective_depth();
+
+    for cell_y in 0..rows {
+        for cell_x in 0..cols {
+            let Some(mut cell) =
+                sample_cell(frame, &geometry, cell_x, cell_y, cfg, time, Some(state))
+            else {
+                continue;
+            };
+            if cfg.style == Style::Lucy {
+                apply_lucy_trail(&mut cell, state, cols, cell_x, cell_y, cfg);
+            }
+
+            let color = if cell.emit_color {
+                color::quantize_rgb(depth, cell.rgb.0, cell.rgb.1, cell.rgb.2)
+            } else {
+                SCREENSHOT_DEFAULT_FG
+            };
+
+            let x0 = usize::from(cell_x) * SCREENSHOT_CELL_WIDTH;
+            let y0 = usize::from(cell_y) * SCREENSHOT_CELL_HEIGHT;
+
+            if cfg.mode == RenderMode::Blocks && cell.emit_color {
+                fill_stream_cell(&mut raster.bgra, width, x0, y0, color);
+                continue;
+            }
+
+            let Some(font) = font else {
+                continue;
+            };
+            let mask = raster
+                .glyph_masks
+                .entry(cell.ch)
+                .or_insert_with(|| build_glyph_mask(font, cell.ch));
+            blit_stream_glyph(&mut raster.bgra, width, x0, y0, color, mask);
+        }
+    }
+    state.end_frame();
+    true
+}
+
+fn fill_stream_cell(bgra: &mut [u8], image_width: usize, x0: usize, y0: usize, c: (u8, u8, u8)) {
+    for py in 0..SCREENSHOT_CELL_HEIGHT {
+        let row = (y0 + py) * image_width * 4;
+        for px in 0..SCREENSHOT_CELL_WIDTH {
+            let i = row + (x0 + px) * 4;
+            bgra[i] = c.2;
+            bgra[i + 1] = c.1;
+            bgra[i + 2] = c.0;
+        }
+    }
+}
+
+fn blit_stream_glyph(
+    bgra: &mut [u8],
+    image_width: usize,
+    x0: usize,
+    y0: usize,
+    c: (u8, u8, u8),
+    mask: &[f32; STREAM_CELL_PIXELS],
+) {
+    for py in 0..SCREENSHOT_CELL_HEIGHT {
+        let row = (y0 + py) * image_width * 4;
+        for px in 0..SCREENSHOT_CELL_WIDTH {
+            let coverage = mask[py * SCREENSHOT_CELL_WIDTH + px];
+            if coverage <= 0.0 {
+                continue;
+            }
+            let i = row + (x0 + px) * 4;
+            bgra[i] = (c.2 as f32 * coverage) as u8;
+            bgra[i + 1] = (c.1 as f32 * coverage) as u8;
+            bgra[i + 2] = (c.0 as f32 * coverage) as u8;
+        }
+    }
+}
+
+/// Rasterizes `ch` once into a coverage mask, mirroring `draw_glyph`'s
+/// layout: same centering, gamma boost, and 0.45 px double-strike (folded in
+/// as `1 - (1-a)(1-b)`, which is what two sequential blends over a shared
+/// background produce).
+fn build_glyph_mask(font: &FontArc, ch: char) -> [f32; STREAM_CELL_PIXELS] {
+    let mut mask = [0.0f32; STREAM_CELL_PIXELS];
+    let scaled = font.as_scaled(SCREENSHOT_FONT_SCALE);
+    let glyph_id = font.glyph_id(ch);
+    let advance = scaled.h_advance(glyph_id);
+    let baseline =
+        ((SCREENSHOT_CELL_HEIGHT as f32 - scaled.height()) * 0.5 + scaled.ascent()).round();
+    let x = ((SCREENSHOT_CELL_WIDTH as f32 - advance) * 0.5).floor();
+
+    for strike_x in [x, x + 0.45] {
+        let glyph = glyph_id.with_scale_and_position(SCREENSHOT_FONT_SCALE, point(strike_x, baseline));
+        let Some(outlined) = font.outline_glyph(glyph) else {
+            continue;
+        };
+        let bounds = outlined.px_bounds();
+        outlined.draw(|gx, gy, coverage| {
+            if coverage <= 0.0 {
+                return;
+            }
+            let px = bounds.min.x as i32 + gx as i32;
+            let py = bounds.min.y as i32 + gy as i32;
+            if px < 0
+                || py < 0
+                || px >= SCREENSHOT_CELL_WIDTH as i32
+                || py >= SCREENSHOT_CELL_HEIGHT as i32
+            {
+                return;
+            }
+            let terminal_coverage = coverage.powf(SCREENSHOT_GLYPH_GAMMA).clamp(0.0, 1.0);
+            let i = py as usize * SCREENSHOT_CELL_WIDTH + px as usize;
+            mask[i] = 1.0 - (1.0 - mask[i]) * (1.0 - terminal_coverage);
+        });
+    }
+
+    mask
+}
+
 fn screenshot_font() -> Option<&'static FontArc> {
     static FONT: OnceLock<Option<FontArc>> = OnceLock::new();
     FONT.get_or_init(load_screenshot_font).as_ref()
@@ -622,9 +800,14 @@ fn sample_cell(
     let ch = match cfg.mode {
         RenderMode::Ascii => ascii::luma_to_char(luma, cfg.contrast, emit_color),
         // Color styles: color escapes carry brightness, so always solid █.
-        // B&W: no color, fall back to shade ramp so the image is legible.
+        // B&W: no color, so brightness becomes a 1-bit ordered dither —
+        // only ' ' and '█', never a gray partial-coverage shade.
+        // Gray 5-Step: the older look — luma picks from the `░▒▓█` ramp.
         RenderMode::Blocks if emit_color => '█',
-        RenderMode::Blocks => ascii::luma_to_shade(luma, cfg.contrast),
+        RenderMode::Blocks if cfg.style == Style::GrayFive => {
+            ascii::luma_to_shade(luma, cfg.contrast)
+        }
+        RenderMode::Blocks => ascii::luma_to_bilevel(luma, cfg.contrast, c, r),
     };
 
     Some(RenderedCell {

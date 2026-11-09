@@ -46,7 +46,7 @@ const ITEMS: [&str; 10] = [
 // Unicode half-block chars (▀ top, ▄ bottom, █ full) stack vertically.
 const TITLE_LINE_1: &str = "▀█▀ █▀▀ █▀▄ █▄▀▄█ █ █▄ █ ▄▀█ █     ▄▀▀ ▄▀█ █▄▀▄█";
 const TITLE_LINE_2: &str = " █  █▀▀ █▀▄ █ ▀ █ █ █ ▀█ █▀█ █     █   █▀█ █ ▀ █";
-const TITLE_LINE_3: &str = " █  █▄▄ ▀▄▄ █   █ █ █  █ █ █ █▄▄ ▀▄▄ █ █ █   █";
+const TITLE_LINE_3: &str = " █  █▄▄ █ █ █   █ █ █  █ █ █ █▄▄ ▄ ▀▄▄ █ █ █   █";
 const TITLE_COLS: u16 = 48;
 
 impl MenuState {
@@ -315,4 +315,16 @@ pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &m
         fx + 1,
         footer
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_lines_have_equal_width() {
+        for line in [TITLE_LINE_1, TITLE_LINE_2, TITLE_LINE_3] {
+            assert_eq!(line.chars().count(), TITLE_COLS as usize, "{line:?}");
+        }
+    }
 }
