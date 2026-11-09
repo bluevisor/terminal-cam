@@ -278,8 +278,7 @@ fn monet(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     let (mut h, s, v) = rgb_to_hsv(r, g, b);
     let (x, y, t) = (ctx.x as f32, ctx.y as f32, ctx.time);
     // Low-freq product-of-sines: slow "dappled light through leaves".
-    let dapple = (x * 0.13 + y * 0.11 + t * 0.25).sin()
-        * (x * 0.09 - y * 0.14 - t * 0.18).sin();
+    let dapple = (x * 0.13 + y * 0.11 + t * 0.25).sin() * (x * 0.09 - y * 0.14 - t * 0.18).sin();
 
     // Pastelize: cap saturation, lift gamma so mids bloom.
     let sat = (s * 0.40 + 0.14).clamp(0.0, 1.0);

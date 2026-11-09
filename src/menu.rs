@@ -230,7 +230,10 @@ pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &m
 
     // Title — 3-row half-block ASCII art, centered.
     let tx = x0 + (width - TITLE_COLS) / 2;
-    for (offset, line) in [TITLE_LINE_1, TITLE_LINE_2, TITLE_LINE_3].iter().enumerate() {
+    for (offset, line) in [TITLE_LINE_1, TITLE_LINE_2, TITLE_LINE_3]
+        .iter()
+        .enumerate()
+    {
         let _ = write!(
             buf,
             "\x1b[{};{}H\x1b[1m{}\x1b[0m",

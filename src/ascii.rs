@@ -6,13 +6,12 @@
 //! function's shape dominates the visual feel.
 
 pub const RAMP: [char; 95] = [
-    ' ', '`', '.', '\'', '-', ',', '_', ':', '^', '"', ';', '~', '!', '|', 'i',
-    'l', '/', '\\', 'I', 'j', '(', ')', '[', ']', '{', '}', 't', '?', '+', '<',
-    '>', '*', '=', 'r', 'c', 'v', 'x', 'y', 'z', 's', 'n', 'u', 'o', 'L', 'T',
-    '7', '1', 'J', 'Y', 'C', 'F', 'Z', '2', '3', '4', '5', '6', 'w', 'a', 'e',
-    'f', 'k', 'h', 'b', 'd', 'p', 'q', 'g', 'm', 'P', 'G', 'E', '9', '0', '8',
-    'A', 'H', 'N', 'U', 'V', 'S', 'K', 'X', 'R', 'D', 'B', 'O', 'Q', 'M', 'W',
-    '@', '#', '&', '%', '$',
+    ' ', '`', '.', '\'', '-', ',', '_', ':', '^', '"', ';', '~', '!', '|', 'i', 'l', '/', '\\',
+    'I', 'j', '(', ')', '[', ']', '{', '}', 't', '?', '+', '<', '>', '*', '=', 'r', 'c', 'v', 'x',
+    'y', 'z', 's', 'n', 'u', 'o', 'L', 'T', '7', '1', 'J', 'Y', 'C', 'F', 'Z', '2', '3', '4', '5',
+    '6', 'w', 'a', 'e', 'f', 'k', 'h', 'b', 'd', 'p', 'q', 'g', 'm', 'P', 'G', 'E', '9', '0', '8',
+    'A', 'H', 'N', 'U', 'V', 'S', 'K', 'X', 'R', 'D', 'B', 'O', 'Q', 'M', 'W', '@', '#', '&', '%',
+    '$',
 ];
 
 /// Apply contrast around 0.5, then shape with a sigmoid and rescale so the
@@ -53,12 +52,7 @@ pub fn luma_to_shade(luma: f32, contrast: f32) -> char {
 /// Classic 4×4 Bayer ordered-dither matrix. Cell `(x % 4, y % 4)` picks a
 /// threshold; the spread of thresholds across the tile turns a hard cutoff
 /// into a stable halftone pattern instead of blotchy solid regions.
-const BAYER4: [[u8; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
+const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 /// 1-bit black/white for B&W + Blocks mode: every cell is either empty or a
 /// solid `█`, never a partial-coverage shade (`░▒▓` read as gray, which B&W
@@ -131,7 +125,10 @@ mod tests {
             .flat_map(|y| (0..4u16).map(move |x| (x, y)))
             .filter(|&(x, y)| luma_to_bilevel(0.75, 1.0, x, y) == '█')
             .count();
-        assert!(lit > 0 && lit < 16, "expected a mixed tile, got {lit}/16 lit");
+        assert!(
+            lit > 0 && lit < 16,
+            "expected a mixed tile, got {lit}/16 lit"
+        );
     }
 
     #[test]

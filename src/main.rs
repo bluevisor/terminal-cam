@@ -262,16 +262,12 @@ fn run(
             } else {
                 None
             };
-            render::render(
-                &frame,
+            let view = render::Viewport {
                 cols,
                 rows,
-                cfg,
-                time,
-                &mut render_state,
-                menu_mask,
-                &mut scratch,
-            );
+                mask: menu_mask,
+            };
+            render::render(&frame, view, cfg, time, &mut render_state, &mut scratch);
             if *in_menu {
                 menu::draw(menu_state, cfg, cols, rows, &mut scratch);
             }

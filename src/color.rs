@@ -136,7 +136,11 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     let cg = cube_step(g);
     let cb = cube_step(b);
     let cube_idx = 16 + 36 * cr + 6 * cg + cb;
-    let (cvr, cvg, cvb) = (CUBE_STEPS[cr as usize], CUBE_STEPS[cg as usize], CUBE_STEPS[cb as usize]);
+    let (cvr, cvg, cvb) = (
+        CUBE_STEPS[cr as usize],
+        CUBE_STEPS[cg as usize],
+        CUBE_STEPS[cb as usize],
+    );
 
     // Gray ramp: 24 values 8, 18, 28, …, 238, at indices 232..=255.
     let gray_avg = ((r as u32 + g as u32 + b as u32) / 3) as u8;
