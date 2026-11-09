@@ -84,6 +84,29 @@ impl Style {
         }
     }
 
+    /// Stable lowercase name used by the config file and `--style`.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Style::Color => "color",
+            Style::Vivid => "vivid",
+            Style::BlackWhite => "bw",
+            Style::GrayFive => "gray5",
+            Style::Grayscale => "grayscale",
+            Style::Sepia => "sepia",
+            Style::Infrared => "infrared",
+            Style::VanGogh => "van-gogh",
+            Style::Monet => "monet",
+            Style::Alice => "alice",
+            Style::Lucy => "lucy",
+        }
+    }
+
+    /// Accepts the slug or the menu label, ignoring case and punctuation
+    /// (`van-gogh`, `"Van Gogh"`, `vangogh`, `B&W`, `bw` all work).
+    pub fn from_name(name: &str) -> Option<Self> {
+        crate::names::find(&ALL, name, |s| [s.slug(), s.label()])
+    }
+
     pub fn emits_color(self) -> bool {
         !matches!(self, Style::BlackWhite | Style::GrayFive)
     }
@@ -278,8 +301,7 @@ fn monet(r: u8, g: u8, b: u8, ctx: &StyleCtx) -> (u8, u8, u8) {
     let (mut h, s, v) = rgb_to_hsv(r, g, b);
     let (x, y, t) = (ctx.x as f32, ctx.y as f32, ctx.time);
     // Low-freq product-of-sines: slow "dappled light through leaves".
-    let dapple = (x * 0.13 + y * 0.11 + t * 0.25).sin()
-        * (x * 0.09 - y * 0.14 - t * 0.18).sin();
+    let dapple = (x * 0.13 + y * 0.11 + t * 0.25).sin() * (x * 0.09 - y * 0.14 - t * 0.18).sin();
 
     // Pastelize: cap saturation, lift gamma so mids bloom.
     let sat = (s * 0.40 + 0.14).clamp(0.0, 1.0);

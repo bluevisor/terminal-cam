@@ -44,6 +44,10 @@ impl RenderMode {
         }
     }
 
+    pub fn from_name(name: &str) -> Option<Self> {
+        crate::names::find(&MODE_CYCLE, name, |m| [m.label(), m.label()])
+    }
+
     pub fn cycle(self, dir: i32) -> Self {
         let idx = MODE_CYCLE.iter().position(|&m| m == self).unwrap_or(0) as i32;
         let n = MODE_CYCLE.len() as i32;
@@ -223,16 +227,24 @@ impl RenderGeometry {
     }
 }
 
+/// Terminal area to draw into, plus an optional `(x0, y0, w, h)` rectangle
+/// (e.g. the menu) whose cells are skipped.
+#[derive(Clone, Copy)]
+pub struct Viewport {
+    pub cols: u16,
+    pub rows: u16,
+    pub mask: Option<(u16, u16, u16, u16)>,
+}
+
 pub fn render(
     frame: &Frame,
-    cols: u16,
-    rows: u16,
+    view: Viewport,
     cfg: &RenderConfig,
     time: f32,
     state: &mut RenderState,
-    mask: Option<(u16, u16, u16, u16)>,
     out: &mut String,
 ) {
+    let Viewport { cols, rows, mask } = view;
     out.clear();
     // Begin synchronized update (DEC 2026). Supporting terminals (iTerm2,
     // Kitty, WezTerm, Ghostty, Alacritty) hold the frame until the matching
@@ -251,8 +263,7 @@ pub fn render(
         // sync would otherwise paint camera content first then overdraw
         // with the menu, which the user sees as flicker.
         let row_mask = mask.and_then(|(mx, my, mw, mh)| {
-            (r >= my && r < my.saturating_add(mh))
-                .then(|| (mx, mx.saturating_add(mw).min(cols)))
+            (r >= my && r < my.saturating_add(mh)).then(|| (mx, mx.saturating_add(mw).min(cols)))
         });
 
         let mut c: u16 = 0;
@@ -345,7 +356,13 @@ pub fn render_screenshot(
                 } else {
                     SCREENSHOT_DEFAULT_FG
                 };
-                paint_screenshot_cell(&mut rgb, width, cell_x, cell_y, color, &cell, cfg, font);
+                let x0 = usize::from(cell_x) * SCREENSHOT_CELL_WIDTH;
+                let y0 = usize::from(cell_y) * SCREENSHOT_CELL_HEIGHT;
+                if cfg.mode == RenderMode::Blocks && cell.emit_color {
+                    fill_screenshot_cell(&mut rgb, width, x0, y0, color);
+                } else if let Some(font) = font {
+                    draw_glyph(&mut rgb, width, x0, y0, color, cell.ch, font);
+                }
             }
         }
     }
@@ -355,30 +372,6 @@ pub fn render_screenshot(
         height: height as u32,
         rgb,
     })
-}
-
-fn paint_screenshot_cell(
-    image: &mut [u8],
-    image_width: usize,
-    cell_x: u16,
-    cell_y: u16,
-    color: (u8, u8, u8),
-    cell: &RenderedCell,
-    cfg: &RenderConfig,
-    font: Option<&FontArc>,
-) {
-    let x0 = usize::from(cell_x) * SCREENSHOT_CELL_WIDTH;
-    let y0 = usize::from(cell_y) * SCREENSHOT_CELL_HEIGHT;
-
-    if cfg.mode == RenderMode::Blocks && cell.emit_color {
-        fill_screenshot_cell(image, image_width, x0, y0, color);
-        return;
-    }
-
-    let Some(font) = font else {
-        return;
-    };
-    draw_glyph(image, image_width, x0, y0, color, cell.ch, font);
 }
 
 fn fill_screenshot_cell(
@@ -531,11 +524,8 @@ pub fn render_stream_bgra(
     let width = usize::from(cols) * SCREENSHOT_CELL_WIDTH;
     let height = usize::from(rows) * SCREENSHOT_CELL_HEIGHT;
     raster.bgra.resize(width * height * 4, 0);
-    for px in raster.bgra.chunks_exact_mut(4) {
-        px[0] = 0;
-        px[1] = 0;
-        px[2] = 0;
-        px[3] = 255;
+    for px in raster.bgra.as_chunks_mut::<4>().0 {
+        *px = [0, 0, 0, 255];
     }
 
     state.prepare(cols, rows, cfg.style);
@@ -629,7 +619,8 @@ fn build_glyph_mask(font: &FontArc, ch: char) -> [f32; STREAM_CELL_PIXELS] {
     let x = ((SCREENSHOT_CELL_WIDTH as f32 - advance) * 0.5).floor();
 
     for strike_x in [x, x + 0.45] {
-        let glyph = glyph_id.with_scale_and_position(SCREENSHOT_FONT_SCALE, point(strike_x, baseline));
+        let glyph =
+            glyph_id.with_scale_and_position(SCREENSHOT_FONT_SCALE, point(strike_x, baseline));
         let Some(outlined) = font.outline_glyph(glyph) else {
             continue;
         };
@@ -709,11 +700,25 @@ fn sample_cell(
     // chromatic aberration; everything else uses one shared block average.
     let (raw_r, raw_g, raw_b) = if cfg.style == Style::Alice {
         let (ca_dx, ca_dy) = alice_ca_offset_pixels(geometry, c, r, time, cfg.mirror);
-        let r_avg =
-            sample_channel_avg(frame, geometry, cx, r, warp_dx_px + ca_dx, warp_dy_px + ca_dy, 0);
+        let r_avg = sample_channel_avg(
+            frame,
+            geometry,
+            cx,
+            r,
+            warp_dx_px + ca_dx,
+            warp_dy_px + ca_dy,
+            0,
+        );
         let g_avg = sample_channel_avg(frame, geometry, cx, r, warp_dx_px, warp_dy_px, 1);
-        let b_avg =
-            sample_channel_avg(frame, geometry, cx, r, warp_dx_px - ca_dx, warp_dy_px - ca_dy, 2);
+        let b_avg = sample_channel_avg(
+            frame,
+            geometry,
+            cx,
+            r,
+            warp_dx_px - ca_dx,
+            warp_dy_px - ca_dy,
+            2,
+        );
         (r_avg, g_avg, b_avg)
     } else {
         let raw_y0 = geometry.crop_y0 + r as f32 * geometry.cell_h + warp_dy_px;
@@ -743,18 +748,9 @@ fn sample_cell(
     };
 
     let brightness_offset = (cfg.brightness * 255.0) as i32;
-    let avg_r = contrast_u8(
-        clamp_u8(raw_r as i32 + brightness_offset),
-        cfg.contrast,
-    );
-    let avg_g = contrast_u8(
-        clamp_u8(raw_g as i32 + brightness_offset),
-        cfg.contrast,
-    );
-    let avg_b = contrast_u8(
-        clamp_u8(raw_b as i32 + brightness_offset),
-        cfg.contrast,
-    );
+    let avg_r = contrast_u8(clamp_u8(raw_r as i32 + brightness_offset), cfg.contrast);
+    let avg_g = contrast_u8(clamp_u8(raw_g as i32 + brightness_offset), cfg.contrast);
+    let avg_b = contrast_u8(clamp_u8(raw_b as i32 + brightness_offset), cfg.contrast);
 
     let (edge_x, edge_y, edge) =
         sample_edge(frame, geometry, c, r, cfg.mirror, warp_dx_px, warp_dy_px);
@@ -841,7 +837,9 @@ fn alice_ca_offset_pixels(
         return (0.0, 0.0);
     }
     let r_dist = r_dist_sq.sqrt();
-    let r_max = (cx_center * cx_center + cy_center * cy_center).sqrt().max(1.0);
+    let r_max = (cx_center * cx_center + cy_center * cy_center)
+        .sqrt()
+        .max(1.0);
 
     // Breath: 0..1 sine at ~0.85 rad/s → period ≈ 7.4 s. Lifts the peak
     // amplitude from a calm baseline to a heavy splay and back.
@@ -868,13 +866,7 @@ fn alice_ca_offset_pixels(
 /// no brightness/contrast). Used by the motion accumulator so it always
 /// observes the raw frame, including for cells that the renderer is
 /// otherwise skipping (e.g. under the menu mask).
-fn block_luma_avg(
-    frame: &Frame,
-    geometry: &RenderGeometry,
-    c: u16,
-    r: u16,
-    mirror: bool,
-) -> u8 {
+fn block_luma_avg(frame: &Frame, geometry: &RenderGeometry, c: u16, r: u16, mirror: bool) -> u8 {
     let cx = if mirror { geometry.cols - 1 - c } else { c };
     let raw_y0 = geometry.crop_y0 + r as f32 * geometry.cell_h;
     let raw_y1 = geometry.crop_y0 + (r + 1) as f32 * geometry.cell_h;
@@ -897,11 +889,7 @@ fn block_luma_avg(
             n += 1;
         }
     }
-    if n == 0 {
-        0
-    } else {
-        (s / n).min(255) as u8
-    }
+    s.checked_div(n).unwrap_or(0).min(255) as u8
 }
 
 /// whole window back so it samples the nearest in-bounds region at full
@@ -939,11 +927,7 @@ fn sample_channel_avg(
             n += 1;
         }
     }
-    if n == 0 {
-        0
-    } else {
-        (s / n) as u8
-    }
+    s.checked_div(n).unwrap_or(0) as u8
 }
 
 /// Alice UV warp: shift each cell's source-frame sampling position by a
@@ -1010,10 +994,8 @@ fn apply_lucy_trail(
     state.trails[idx] = blended;
     cell.rgb = blended;
 
-    let luma = (0.299 * blended.0 as f32
-        + 0.587 * blended.1 as f32
-        + 0.114 * blended.2 as f32)
-        / 255.0;
+    let luma =
+        (0.299 * blended.0 as f32 + 0.587 * blended.1 as f32 + 0.114 * blended.2 as f32) / 255.0;
     cell.ch = match cfg.mode {
         RenderMode::Ascii => ascii::luma_to_char(luma, cfg.contrast, true),
         RenderMode::Blocks => '█',
@@ -1138,14 +1120,16 @@ mod tests {
 
     #[test]
     fn ascii_screenshot_renders_glyph_shape() {
-        let mut cfg = RenderConfig::default();
-        cfg.mode = RenderMode::Ascii;
+        let mut cfg = RenderConfig {
+            mode: RenderMode::Ascii,
+            ..Default::default()
+        };
         let ascii = render_screenshot(&frame((128, 128, 128)), 1, 1, &cfg, 0.0).unwrap();
 
         cfg.mode = RenderMode::Blocks;
         let blocks = render_screenshot(&frame((128, 128, 128)), 1, 1, &cfg, 0.0).unwrap();
 
-        assert!(ascii.rgb.chunks_exact(3).any(|pixel| pixel == [0, 0, 0]));
-        assert!(blocks.rgb.chunks_exact(3).all(|pixel| pixel != [0, 0, 0]));
+        assert!(ascii.rgb.as_chunks::<3>().0.contains(&[0, 0, 0]));
+        assert!(!blocks.rgb.as_chunks::<3>().0.contains(&[0, 0, 0]));
     }
 }

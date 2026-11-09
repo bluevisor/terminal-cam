@@ -8,6 +8,24 @@ fractal-driven psychedelic modes.
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew tap bluevisor/terminal-cam https://github.com/bluevisor/terminal-cam
+brew install terminal-cam          # latest release
+brew install --HEAD terminal-cam   # or straight from main
+```
+
+Homebrew builds from source, so it pulls in Rust for you.
+
+### Prebuilt binaries
+
+Each [release](https://github.com/bluevisor/terminal-cam/releases) has
+`tar.gz` builds for Apple Silicon, Intel Macs, and x86_64 Linux. The macOS
+binaries aren't notarized: if you downloaded one in a browser, clear the
+quarantine flag once with `xattr -d com.apple.quarantine terminal-cam`
+(downloads via `curl` aren't quarantined).
+
 ### Vanilla macOS (no cargo / no Rust yet)
 
 If you've never built a Rust project on this Mac, you need the Xcode
@@ -48,14 +66,17 @@ terminal application (System Settings → Privacy & Security → Camera).
 
 ## Controls
 
-| Key            | Action              |
-| -------------- | ------------------- |
-| `Esc`          | Open / close menu   |
-| `↑` `↓`        | Select menu item    |
-| `←` `→`        | Change value        |
-| `Enter`        | Apply / advance     |
-| `Space`        | Save screenshot     |
-| `q` / `Ctrl-C` | Quit                |
+| Key            | Action                                      |
+| -------------- | ------------------------------------------- |
+| `←` `→`        | Previous / next style                       |
+| `m`            | Toggle render mode (ASCII / Blocks)         |
+| `r`            | Start / stop GIF recording                  |
+| `v`            | Toggle the virtual camera (macOS)           |
+| `Space`        | Save screenshot                             |
+| `Esc`          | Open / close menu                           |
+| `q` / `Ctrl-C` | Quit                                        |
+
+In the menu: `↑` `↓` select a row, `←` `→` change it, `Enter` applies.
 
 ## Options
 
@@ -89,20 +110,58 @@ terminal application (System Settings → Privacy & Security → Camera).
 - **Contrast** — `0.1` to `3.0`. Applied to RGB upstream (not just to glyph
   density) so it affects the emitted color, Van Gogh palette-band
   selection, and Alice / Lucy HSV value.
-- **Screenshot path** — directory used when pressing `Space`. Press `Enter`
-  or `→` on the row, type a path, then press `Enter` to save it to the app
-  config. `~` is expanded to your home directory.
+- **Virtual camera** — on / off, with live connection state (macOS; see
+  below).
+- **Vcam detail** — cell grid the virtual camera renders: `chunky` (64×18),
+  `coarse` (96×27), `normal` (160×45), `fine` (224×63). Fewer cells means
+  bigger, bolder glyphs; output is always 1280×720.
+- **Screenshot path** — directory for screenshots and recordings. Press
+  `Enter` or `→` on the row, type a path, then press `Enter` to save it.
+  `~` is expanded to your home directory.
 
 Screenshots are saved as PNG files using the current terminal crop, mirror,
 style, brightness, contrast, and render mode settings.
+
+**Settings are remembered.** Everything above, plus the last camera you
+used, is saved to `~/Library/Application Support/terminal-cam/config` on
+macOS (`~/.config/terminal-cam/config` elsewhere, or
+`$XDG_CONFIG_HOME/terminal-cam/config`), so the next launch picks up
+where you left off.
+
+## Recording
+
+Press `r` to record an animated GIF of the styled feed and `r` again to
+stop; a red `● REC` badge shows while it runs. Recordings use the same
+look as screenshots at 15 fps, are capped at 120 columns wide and 60
+seconds, and land in the screenshot folder. Encoding runs on a background
+thread, so the live view doesn't stutter.
+
+## Command-line flags
+
+```text
+-s, --style <NAME>       color | vivid | bw | gray5 | grayscale | sepia |
+                         infrared | van-gogh | monet | alice | lucy
+-m, --mode <MODE>        ascii | blocks
+-d, --depth <DEPTH>      auto | truecolor | 256 | 16
+    --mirror / --no-mirror
+-b, --brightness <N>     -1.0 to 1.0
+-c, --contrast <N>       0.1 to 3.0
+    --camera <N|NAME>    number from --list-cameras, or part of the name
+    --virtual-cam / --no-virtual-cam
+    --vcam-detail <D>    chunky | coarse | normal | fine
+    --list-cameras / --list-styles / --help / --version
+```
+
+Flags override your saved settings for that run only, e.g.
+`terminal-cam --style van-gogh --mode blocks --camera brio`.
 
 ## Virtual camera (macOS)
 
 `terminal-cam --virtual-cam` publishes the styled feed as a system-wide
 camera called **Terminal Cam** that any video app (Zoom, Meet, FaceTime,
-QuickTime…) can select. Frames are rasterized at 1280×720 (160×45 cells,
-8×16 px each) with the same style, mode, and color settings as the
-terminal view.
+QuickTime…) can select. Frames are rasterized at 8×16 px per cell with the
+same style, mode, and color settings as the terminal view, then scaled to
+1280×720 (exact at the default 160×45-cell detail).
 
 This uses a CoreMediaIO camera extension, which macOS requires to be
 shipped inside a signed app. One-time setup:
@@ -127,9 +186,11 @@ Push `macos/allow-terminal-cam-extension.mobileconfig` (a
 `com.apple.system-extension-policy` payload allowing team `CKGXYS3R8N` /
 `com.bluevisor.terminalcam.extension`) from your MDM, then retry.
 
-Then run `terminal-cam --virtual-cam`. The status bar reports when the
-virtual camera connects; while terminal-cam isn't running, apps see a
-placeholder card. Uninstall any time from TerminalCamCamera.app.
+Then press `v` in terminal-cam (or launch with `--virtual-cam`, or use
+the **Virtual camera** menu row). The status bar reports when the virtual
+camera connects; while terminal-cam isn't running, apps see a placeholder
+card. Pick a **Vcam detail** level in the menu for bolder or finer glyphs.
+Uninstall any time from TerminalCamCamera.app.
 
 ## Terminal compatibility
 
@@ -174,11 +235,16 @@ don't squash or stretch as you resize the window.
 
 ## Project structure
 
-- `src/main.rs` — input loop, terminal mode setup, frame pacing
+- `src/main.rs` — input loop, hotkeys, terminal mode setup, frame pacing,
+  settings autosave
+- `src/cli.rs` — command-line flags and `--help`
+- `src/record.rs` — GIF recording (background encoder thread)
+- `src/vcam.rs` — macOS virtual camera output, detail levels, resampling
+- `src/names.rs` — forgiving name matching for styles / modes / depths
 - `src/camera.rs` — `nokhwa` capture thread + shared frame slot
 - `src/render.rs` — per-cell render pipeline, config, synchronized output
 - `src/screenshot.rs` — screenshot capture + dependency-free PNG writing
-- `src/config.rs` — screenshot path config load/save
+- `src/config.rs` — persisted settings (key=value file)
 - `src/style.rs` — style transforms (Sepia / Van Gogh / Monet / Alice /
   Lucy) and the Julia-set iteration helper
 - `src/color.rs` — depth detection + truecolor / 256 / ANSI-16 quantization
@@ -207,6 +273,8 @@ to explore different regions of the fractal parameter space.
 - [`crossterm`](https://crates.io/crates/crossterm) — terminal I/O
 - [`parking_lot`](https://crates.io/crates/parking_lot) — faster mutex for the frame slot
 - [`anyhow`](https://crates.io/crates/anyhow) — error handling
+- [`ab_glyph`](https://crates.io/crates/ab_glyph) — glyph rasterizing for screenshots, GIFs, and the virtual camera
+- [`gif`](https://crates.io/crates/gif) — GIF encoding
 
 ## License
 

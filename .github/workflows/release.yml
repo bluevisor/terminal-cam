@@ -1,0 +1,95 @@
+name: Release
+
+# Push a tag like v0.2.0 to build binaries, publish a GitHub release, and
+# point the Homebrew formula at the new source tarball.
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default; only the release job (no third-party actions)
+# gets write access.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned so a new Rust release can't turn new clippy lints into red CI
+  # overnight. Bump deliberately (and fix any new lints) when upgrading.
+  RUST_VERSION: "1.99.1"
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_VERSION"
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          name="terminal-cam-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/terminal-cam" README.md LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: terminal-cam-*.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+      - name: Update Homebrew formula
+        run: |
+          tag="$GITHUB_REF_NAME"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
+          sha=$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)
+          # Drop any previous url/sha256, then insert fresh ones after `homepage`.
+          sed -i -e '/^  url "/d' -e '/^  sha256 "/d' Formula/terminal-cam.rb
+          sed -i "/^  homepage /a\\  url \"${url}\"\n  sha256 \"${sha}\"" Formula/terminal-cam.rb
+          cat Formula/terminal-cam.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/terminal-cam.rb
+          git commit -m "Homebrew: terminal-cam ${tag}"
+          git push origin HEAD:main

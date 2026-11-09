@@ -100,7 +100,11 @@ pub fn spawn_capture(camera_index: u32) -> Result<CaptureHandle> {
                     if let Ok(img) = buf.decode_image::<RgbFormat>() {
                         let (w, h) = (img.width(), img.height());
                         let rgb = img.into_raw();
-                        *frame_c.lock() = Some(Frame { width: w, height: h, rgb });
+                        *frame_c.lock() = Some(Frame {
+                            width: w,
+                            height: h,
+                            rgb,
+                        });
                     }
                 }
                 Err(_) => thread::sleep(Duration::from_millis(5)),
@@ -110,5 +114,9 @@ pub fn spawn_capture(camera_index: u32) -> Result<CaptureHandle> {
         let _ = camera.stop_stream();
     });
 
-    Ok(CaptureHandle { frame, error, running })
+    Ok(CaptureHandle {
+        frame,
+        error,
+        running,
+    })
 }

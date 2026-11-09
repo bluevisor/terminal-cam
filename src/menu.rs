@@ -1,6 +1,6 @@
 //! Centered options overlay.
 
-use crate::{camera::CameraInfo, color::ColorDepth, render::RenderConfig};
+use crate::{camera::CameraInfo, color::ColorDepth, render::RenderConfig, vcam::VcamDetail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -10,6 +10,10 @@ pub struct MenuState {
     pub cameras: Vec<CameraInfo>,
     pub current_camera: u32,
     pub screenshot_dir: PathBuf,
+    /// Virtual-camera display state, synced by the main loop before drawing.
+    pub vcam_on: bool,
+    pub vcam_status: &'static str,
+    pub vcam_detail: VcamDetail,
     path_editor: Option<String>,
 }
 
@@ -24,10 +28,12 @@ pub enum Action {
     ToggleMirror,
     AdjustBrightness(f32),
     AdjustContrast(f32),
+    ToggleVirtualCam,
+    CycleVcamDetail(i32),
     SetScreenshotDir(String),
 }
 
-const ITEMS: [&str; 10] = [
+const ITEMS: [&str; 12] = [
     "Camera source",
     "Style",
     "Render mode",
@@ -35,6 +41,8 @@ const ITEMS: [&str; 10] = [
     "Mirror",
     "Brightness",
     "Contrast",
+    "Virtual camera",
+    "Vcam detail",
     "Screenshot path",
     "Close menu (Esc)",
     "Quit (q)",
@@ -56,6 +64,9 @@ impl MenuState {
             cameras,
             current_camera,
             screenshot_dir,
+            vcam_on: false,
+            vcam_status: "",
+            vcam_detail: VcamDetail::Normal,
             path_editor: None,
         }
     }
@@ -147,12 +158,14 @@ impl MenuState {
             4 => Action::ToggleMirror,
             5 => Action::AdjustBrightness(dir as f32 * 0.05),
             6 => Action::AdjustContrast(dir as f32 * 0.1),
-            7 => {
+            7 => Action::ToggleVirtualCam,
+            8 => Action::CycleVcamDetail(dir),
+            9 => {
                 self.path_editor = Some(self.screenshot_dir.display().to_string());
                 Action::None
             }
-            8 => Action::Close,
-            9 => Action::Quit,
+            10 => Action::Close,
+            11 => Action::Quit,
             _ => Action::None,
         }
     }
@@ -230,7 +243,10 @@ pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &m
 
     // Title — 3-row half-block ASCII art, centered.
     let tx = x0 + (width - TITLE_COLS) / 2;
-    for (offset, line) in [TITLE_LINE_1, TITLE_LINE_2, TITLE_LINE_3].iter().enumerate() {
+    for (offset, line) in [TITLE_LINE_1, TITLE_LINE_2, TITLE_LINE_3]
+        .iter()
+        .enumerate()
+    {
         let _ = write!(
             buf,
             "\x1b[{};{}H\x1b[1m{}\x1b[0m",
@@ -269,7 +285,18 @@ pub fn draw(state: &MenuState, cfg: &RenderConfig, cols: u16, rows: u16, buf: &m
             }
             5 => format!("{:+.2}", cfg.brightness),
             6 => format!("{:.1}", cfg.contrast),
-            7 => state
+            7 => {
+                if state.vcam_on {
+                    format!("on · {}", state.vcam_status)
+                } else {
+                    "off".into()
+                }
+            }
+            8 => {
+                let (c, r) = state.vcam_detail.grid();
+                format!("{} · {c}×{r} cells", state.vcam_detail.label())
+            }
+            9 => state
                 .path_editor
                 .as_ref()
                 .map(|value| format!("{value}_"))
