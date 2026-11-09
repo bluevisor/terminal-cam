@@ -4,6 +4,10 @@
 //! (see macos/) through its sink stream. The extension must be installed
 //! via TerminalCamCamera.app before the device exists; until then (and
 //! whenever the device disappears) this module keeps retrying quietly.
+//!
+//! On other platforms `VirtualCam` is a stub that reports "macOS only", so
+//! most of this module is intentionally unused there.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use crate::{camera::Frame, render};
 use std::time::{Duration, Instant};
@@ -211,7 +215,6 @@ impl VirtualCam {
     ) -> VcamEvent {
         if !self.announced_waiting {
             self.announced_waiting = true;
-            let _ = (&self.last_attempt, &self.state, &self.raster, &self.scaled);
             return VcamEvent::Unsupported;
         }
         VcamEvent::None
@@ -290,10 +293,18 @@ mod tests {
         let mut dst = Vec::new();
         resample_bgra(&src, (512, 288), &mut dst, (OUT_WIDTH, OUT_HEIGHT));
         assert_eq!(dst.len(), OUT_WIDTH * OUT_HEIGHT * 4);
-        assert!(dst.chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
+        assert!(dst
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [10, 20, 30, 255]));
 
         let src: Vec<u8> = [200u8, 100, 50, 255].repeat(1792 * 1008);
         resample_bgra(&src, (1792, 1008), &mut dst, (OUT_WIDTH, OUT_HEIGHT));
-        assert!(dst.chunks_exact(4).all(|p| p == [200, 100, 50, 255]));
+        assert!(dst
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [200, 100, 50, 255]));
     }
 }

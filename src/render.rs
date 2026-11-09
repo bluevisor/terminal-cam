@@ -524,11 +524,8 @@ pub fn render_stream_bgra(
     let width = usize::from(cols) * SCREENSHOT_CELL_WIDTH;
     let height = usize::from(rows) * SCREENSHOT_CELL_HEIGHT;
     raster.bgra.resize(width * height * 4, 0);
-    for px in raster.bgra.chunks_exact_mut(4) {
-        px[0] = 0;
-        px[1] = 0;
-        px[2] = 0;
-        px[3] = 255;
+    for px in raster.bgra.as_chunks_mut::<4>().0 {
+        *px = [0, 0, 0, 255];
     }
 
     state.prepare(cols, rows, cfg.style);
@@ -892,11 +889,7 @@ fn block_luma_avg(frame: &Frame, geometry: &RenderGeometry, c: u16, r: u16, mirr
             n += 1;
         }
     }
-    if n == 0 {
-        0
-    } else {
-        (s / n).min(255) as u8
-    }
+    s.checked_div(n).unwrap_or(0).min(255) as u8
 }
 
 /// whole window back so it samples the nearest in-bounds region at full
@@ -934,11 +927,7 @@ fn sample_channel_avg(
             n += 1;
         }
     }
-    if n == 0 {
-        0
-    } else {
-        (s / n) as u8
-    }
+    s.checked_div(n).unwrap_or(0) as u8
 }
 
 /// Alice UV warp: shift each cell's source-frame sampling position by a
@@ -1140,7 +1129,7 @@ mod tests {
         cfg.mode = RenderMode::Blocks;
         let blocks = render_screenshot(&frame((128, 128, 128)), 1, 1, &cfg, 0.0).unwrap();
 
-        assert!(ascii.rgb.chunks_exact(3).any(|pixel| pixel == [0, 0, 0]));
-        assert!(blocks.rgb.chunks_exact(3).all(|pixel| pixel != [0, 0, 0]));
+        assert!(ascii.rgb.as_chunks::<3>().0.contains(&[0, 0, 0]));
+        assert!(!blocks.rgb.as_chunks::<3>().0.contains(&[0, 0, 0]));
     }
 }

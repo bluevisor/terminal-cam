@@ -186,7 +186,7 @@ fn centis(d: Duration) -> u16 {
 
 fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);
-    for px in bgra.chunks_exact(4) {
+    for px in bgra.as_chunks::<4>().0 {
         rgb.extend_from_slice(&[px[2], px[1], px[0]]);
     }
     rgb

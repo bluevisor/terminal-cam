@@ -10,6 +10,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned so a new Rust release can't turn new clippy lints into red CI
+  # overnight. Bump deliberately (and fix any new lints) when upgrading.
+  RUST_VERSION: "1.99.1"
 
 jobs:
   check:
@@ -29,7 +32,7 @@ jobs:
 
       # rustup is preinstalled on GitHub runners; no third-party action needed.
       - name: Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy && rustup default "$RUST_VERSION"
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 

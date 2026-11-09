@@ -13,6 +13,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned so a new Rust release can't turn new clippy lints into red CI
+  # overnight. Bump deliberately (and fix any new lints) when upgrading.
+  RUST_VERSION: "1.99.1"
 
 jobs:
   build:
@@ -34,8 +37,8 @@ jobs:
 
       - name: Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
-          rustup default stable
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_VERSION"
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
